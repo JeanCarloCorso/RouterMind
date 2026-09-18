@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 
 from pydantic import SecretStr
@@ -10,6 +11,7 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     secret_key: SecretStr = SecretStr("development-only-change-me-at-least-32-chars")
     database_path: str = "routemind.db"
+    database_url: SecretStr | None = None
     environment: str = "development"
     secure_cookies: bool = False
     catalog_ttl_seconds: int = 900
@@ -20,6 +22,12 @@ class Settings(BaseSettings):
     max_fallback_attempts: int = 2
     app_url: str | None = None
     app_name: str = "RouteMind"
+
+    @property
+    def database_connection(self) -> str:
+        if self.database_url:
+            return self.database_url.get_secret_value()
+        return os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or self.database_path
 
 @lru_cache
 def get_settings() -> Settings:

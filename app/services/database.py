@@ -1,8 +1,45 @@
 import os
-import sqlite3
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import Column, ForeignKey, Index, Integer, MetaData, String, Table, Text, create_engine, delete, event, insert, select, update
+from sqlalchemy.engine import Engine, URL, make_url
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.pool import NullPool
+
+
+metadata = MetaData()
+users = Table(
+    "users",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("email", String(254), nullable=False, unique=True),
+    Column("password_hash", Text, nullable=False),
+    Column("openrouter_key_encrypted", Text),
+    Column("created_at", String(40), nullable=False),
+)
+api_keys = Table(
+    "api_keys",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("label", String(80), nullable=False),
+    Column("key_prefix", String(32), nullable=False),
+    Column("key_hash", String(64), nullable=False, unique=True),
+    Column("created_at", String(40), nullable=False),
+    Column("last_used_at", String(40)),
+    # Kept only for automatic cleanup of databases created before physical deletion.
+    Column("revoked_at", String(40)),
+)
+Index("idx_api_keys_hash", api_keys.c.key_hash)
+
+
+class DuplicateUserError(Exception):
+    pass
 
 
 @dataclass(frozen=True)
@@ -13,116 +50,151 @@ class User:
     openrouter_key_encrypted: str | None
 
 
+def _normalize_url(value: str) -> tuple[str, str | None]:
+    if value.startswith("postgres://"):
+        return "postgresql+psycopg://" + value.removeprefix("postgres://"), None
+    if value.startswith("postgresql://"):
+        return "postgresql+psycopg://" + value.removeprefix("postgresql://"), None
+    if "://" in value:
+        return value, None
+    if value == ":memory:":
+        return "sqlite+pysqlite:///:memory:", None
+    path = str(Path(value).expanduser().resolve())
+    return f"sqlite+pysqlite:///{path}", path
+
+
+def _configure_postgres_url(database_url: str) -> tuple[URL, bool]:
+    url = make_url(database_url)
+    # Supabase exposes its transaction pooler on port 6543. Connections are
+    # short-lived and must not use client-side prepared statements.
+    transaction_pooler = url.get_backend_name() == "postgresql" and url.port == 6543
+    if transaction_pooler and "sslmode" not in url.query:
+        url = url.update_query_dict({"sslmode": "require"})
+    return url, transaction_pooler
+
+
 class Database:
-    def __init__(self, path: str):
-        self.path = path
+    """Synchronous repository supporting PostgreSQL in production and SQLite locally."""
+
+    def __init__(self, url_or_path: str):
+        database_url, sqlite_path = _normalize_url(url_or_path)
+        self.sqlite_path = sqlite_path
+        self.transaction_pooler = False
+        self._connect_args: dict[str, Any] = {}
         self._lock = threading.RLock()
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
-
-    def initialize(self) -> None:
-        with self._lock, self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    email TEXT NOT NULL UNIQUE,
-                    password_hash TEXT NOT NULL,
-                    openrouter_key_encrypted TEXT,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS api_keys (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    label TEXT NOT NULL,
-                    key_prefix TEXT NOT NULL,
-                    key_hash TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL,
-                    last_used_at TEXT,
-                    revoked_at TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
-                """
-            )
-            # Version 0.2 changes revocation into physical deletion. Purge legacy rows
-            # so hashes and metadata from previously revoked keys are not retained.
-            connection.execute("DELETE FROM api_keys WHERE revoked_at IS NOT NULL")
-        if self.path != ":memory:" and os.path.exists(self.path):
-            os.chmod(self.path, 0o600)
+        engine_options: dict[str, Any] = {"pool_pre_ping": True}
+        if database_url.startswith("sqlite"):
+            self._connect_args = {"check_same_thread": False, "timeout": 10}
+            engine_target: str | URL = database_url
+        else:
+            engine_target, self.transaction_pooler = _configure_postgres_url(database_url)
+            if self.transaction_pooler:
+                self._connect_args = {"prepare_threshold": None}
+                engine_options["poolclass"] = NullPool
+            else:
+                engine_options.update({"pool_size": 2, "max_overflow": 1, "pool_recycle": 300})
+        if self._connect_args:
+            engine_options["connect_args"] = self._connect_args
+        self.engine: Engine = create_engine(engine_target, **engine_options)
+        if database_url.startswith("sqlite"):
+            event.listen(self.engine, "connect", self._enable_sqlite_foreign_keys)
 
     @staticmethod
-    def _user(row: sqlite3.Row | None) -> User | None:
+    def _enable_sqlite_foreign_keys(dbapi_connection: Any, _: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.close()
+
+    def initialize(self) -> None:
+        with self._lock:
+            metadata.create_all(self.engine)
+            with self.engine.begin() as connection:
+                connection.execute(delete(api_keys).where(api_keys.c.revoked_at.is_not(None)))
+        if self.sqlite_path and os.path.exists(self.sqlite_path):
+            os.chmod(self.sqlite_path, 0o600)
+
+    def close(self) -> None:
+        self.engine.dispose()
+
+    @staticmethod
+    def _user(row: Mapping[str, Any] | None) -> User | None:
         return User(row["id"], row["email"], row["password_hash"], row["openrouter_key_encrypted"]) if row else None
 
     def create_user(self, email: str, password_hash: str) -> User:
-        now = datetime.now(UTC).isoformat()
-        with self._lock, self._connect() as connection:
-            cursor = connection.execute(
-                "INSERT INTO users(email, password_hash, created_at) VALUES (?, ?, ?)",
-                (email, password_hash, now),
-            )
-            row = connection.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        try:
+            with self._lock, self.engine.begin() as connection:
+                user_id = connection.execute(
+                    insert(users).values(email=email, password_hash=password_hash, created_at=datetime.now(UTC).isoformat()).returning(users.c.id)
+                ).scalar_one()
+                row = connection.execute(select(users).where(users.c.id == user_id)).mappings().first()
+        except IntegrityError as exc:
+            raise DuplicateUserError from exc
         return self._user(row)  # type: ignore[return-value]
 
     def get_user_by_email(self, email: str) -> User | None:
-        with self._lock, self._connect() as connection:
-            return self._user(connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone())
+        with self._lock, self.engine.connect() as connection:
+            row = connection.execute(select(users).where(users.c.email == email)).mappings().first()
+        return self._user(row)
 
     def get_user(self, user_id: int) -> User | None:
-        with self._lock, self._connect() as connection:
-            return self._user(connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
+        with self._lock, self.engine.connect() as connection:
+            row = connection.execute(select(users).where(users.c.id == user_id)).mappings().first()
+        return self._user(row)
 
     def set_openrouter_key(self, user_id: int, encrypted_key: str) -> None:
-        with self._lock, self._connect() as connection:
-            connection.execute("UPDATE users SET openrouter_key_encrypted = ? WHERE id = ?", (encrypted_key, user_id))
+        with self._lock, self.engine.begin() as connection:
+            connection.execute(update(users).where(users.c.id == user_id).values(openrouter_key_encrypted=encrypted_key))
 
     def delete_openrouter_key(self, user_id: int) -> bool:
-        with self._lock, self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE users SET openrouter_key_encrypted = NULL WHERE id = ? AND openrouter_key_encrypted IS NOT NULL",
-                (user_id,),
+        with self._lock, self.engine.begin() as connection:
+            result = connection.execute(
+                update(users)
+                .where(users.c.id == user_id, users.c.openrouter_key_encrypted.is_not(None))
+                .values(openrouter_key_encrypted=None)
             )
-            return cursor.rowcount == 1
+            return result.rowcount == 1
 
     def create_api_key(self, user_id: int, label: str, prefix: str, key_hash: str) -> int:
-        with self._lock, self._connect() as connection:
-            cursor = connection.execute(
-                "INSERT INTO api_keys(user_id, label, key_prefix, key_hash, created_at) VALUES (?, ?, ?, ?, ?)",
-                (user_id, label, prefix, key_hash, datetime.now(UTC).isoformat()),
+        with self._lock, self.engine.begin() as connection:
+            return int(
+                connection.execute(
+                    insert(api_keys)
+                    .values(user_id=user_id, label=label, key_prefix=prefix, key_hash=key_hash, created_at=datetime.now(UTC).isoformat())
+                    .returning(api_keys.c.id)
+                ).scalar_one()
             )
-            return int(cursor.lastrowid)
 
-    def list_api_keys(self, user_id: int) -> list[sqlite3.Row]:
-        with self._lock, self._connect() as connection:
-            return connection.execute(
-                "SELECT id, label, key_prefix, created_at, last_used_at, revoked_at FROM api_keys WHERE user_id = ? ORDER BY id DESC",
-                (user_id,),
-            ).fetchall()
+    def list_api_keys(self, user_id: int) -> list[Mapping[str, Any]]:
+        statement = (
+            select(api_keys.c.id, api_keys.c.label, api_keys.c.key_prefix, api_keys.c.created_at, api_keys.c.last_used_at, api_keys.c.revoked_at)
+            .where(api_keys.c.user_id == user_id)
+            .order_by(api_keys.c.id.desc())
+        )
+        with self._lock, self.engine.connect() as connection:
+            return list(connection.execute(statement).mappings().all())
 
-    def get_api_key(self, user_id: int, key_id: int) -> sqlite3.Row | None:
-        with self._lock, self._connect() as connection:
-            return connection.execute(
-                "SELECT id, label, key_prefix, created_at, last_used_at FROM api_keys WHERE id = ? AND user_id = ?",
-                (key_id, user_id),
-            ).fetchone()
+    def get_api_key(self, user_id: int, key_id: int) -> Mapping[str, Any] | None:
+        statement = select(
+            api_keys.c.id, api_keys.c.label, api_keys.c.key_prefix, api_keys.c.created_at, api_keys.c.last_used_at
+        ).where(api_keys.c.id == key_id, api_keys.c.user_id == user_id)
+        with self._lock, self.engine.connect() as connection:
+            return connection.execute(statement).mappings().first()
 
     def delete_api_key(self, user_id: int, key_id: int) -> bool:
-        with self._lock, self._connect() as connection:
-            cursor = connection.execute("DELETE FROM api_keys WHERE id = ? AND user_id = ?", (key_id, user_id))
-            return cursor.rowcount == 1
+        with self._lock, self.engine.begin() as connection:
+            result = connection.execute(delete(api_keys).where(api_keys.c.id == key_id, api_keys.c.user_id == user_id))
+            return result.rowcount == 1
 
     def find_user_by_api_hash(self, key_hash: str) -> User | None:
-        now = datetime.now(UTC).isoformat()
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                "SELECT u.* FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.key_hash = ? AND k.revoked_at IS NULL",
-                (key_hash,),
-            ).fetchone()
+        statement = (
+            select(users)
+            .select_from(api_keys.join(users, users.c.id == api_keys.c.user_id))
+            .where(api_keys.c.key_hash == key_hash, api_keys.c.revoked_at.is_(None))
+        )
+        with self._lock, self.engine.begin() as connection:
+            row = connection.execute(statement).mappings().first()
             if row:
-                connection.execute("UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?", (now, key_hash))
+                connection.execute(
+                    update(api_keys).where(api_keys.c.key_hash == key_hash).values(last_used_at=datetime.now(UTC).isoformat())
+                )
         return self._user(row)

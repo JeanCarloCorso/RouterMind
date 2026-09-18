@@ -124,7 +124,7 @@ app/
 └── services/
     ├── openrouter_client.py
     ├── auth.py                # Argon2, HMAC e criptografia
-    ├── database.py            # usuários e credenciais SQLite
+    ├── database.py            # repositório PostgreSQL/SQLite via SQLAlchemy
     ├── model_catalog.py
     ├── task_classifier.py
     ├── model_router.py
@@ -178,6 +178,7 @@ Depois de iniciar, abra `http://localhost:8000/register`, crie a conta, cadastre
 |---|---:|---|
 | `ROUTEMIND_SECRET_KEY` | inseguro para desenvolvimento | assina sessões, HMAC das API keys e deriva a chave de criptografia |
 | `ROUTEMIND_DATABASE_PATH` | `routemind.db` | banco SQLite persistente |
+| `ROUTEMIND_DATABASE_URL` | vazio | URL PostgreSQL; tem precedência sobre `DATABASE_PATH` |
 | `ROUTEMIND_ENVIRONMENT` | `development` | use `production` em produção |
 | `ROUTEMIND_SECURE_COOKIES` | `false` | exige cookie HTTPS; obrigatório em produção |
 | `ROUTEMIND_OPENROUTER_BASE_URL` | URL oficial | upstream |
@@ -263,3 +264,38 @@ Senhas usam Argon2id. Sessões são assinadas, `HttpOnly`, `SameSite=Strict` e, 
 Esse segredo possui três funções derivadas e separadas: assinatura das sessões, HMAC das chaves RouteMind e criptografia das credenciais OpenRouter. Não faça rotação direta em uma instalação com dados existentes. Sem um procedimento de migração, a troca invalida todas as chaves RouteMind e torna as credenciais OpenRouter armazenadas indecifráveis.
 
 O banco `routemind.db` e seus arquivos WAL devem ser persistidos e incluídos em backups protegidos. Mesmo com a criptografia das credenciais, o banco contém e-mails, hashes de senha e metadados de uso.
+
+## Deploy na Vercel
+
+O entrypoint ASGI está declarado em `pyproject.toml` como `app.main:app`. Antes de importar o projeto, confirme que a **Production Branch** da Vercel aponta para a branch que contém o código atual. Neste repositório, o desenvolvimento está em `master`; a branch remota `main` ainda pode apontar apenas para o commit inicial.
+
+Variáveis mínimas na Vercel:
+
+```text
+ROUTEMIND_ENVIRONMENT=production
+ROUTEMIND_SECURE_COOKIES=true
+ROUTEMIND_SECRET_KEY=<segredo aleatório estável com pelo menos 32 caracteres>
+ROUTEMIND_APP_URL=https://seu-dominio.vercel.app
+```
+
+Não copie o `.env` para o Git. Cadastre esses valores em **Project Settings → Environment Variables** e use o mesmo `ROUTEMIND_SECRET_KEY` em todos os ambientes que precisem ler as mesmas credenciais criptografadas.
+
+### Banco de dados
+
+O SQLite local não deve ser usado na Vercel: Functions são executadas em ambientes efêmeros e podem ter múltiplas instâncias. O RouteMind suporta PostgreSQL por SQLAlchemy e Psycopg 3. Conecte uma integração como Neon ou Supabase e configure uma destas variáveis:
+
+```text
+ROUTEMIND_DATABASE_URL=postgresql://usuario:senha@host/database?sslmode=require
+```
+
+Também são reconhecidas automaticamente `DATABASE_URL` e `POSTGRES_URL`, comuns em integrações da Vercel. A ordem de precedência é: `ROUTEMIND_DATABASE_URL`, `DATABASE_URL`, `POSTGRES_URL`, `ROUTEMIND_DATABASE_PATH`.
+
+Para Supabase na Vercel, prefira o **Transaction Pooler** na porta `6543`:
+
+```env
+ROUTEMIND_DATABASE_URL=postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-REGION.pooler.supabase.com:6543/postgres?sslmode=require
+```
+
+O RouteMind detecta conexões PostgreSQL na porta `6543`, desativa prepared statements do Psycopg e usa `NullPool`, evitando manter um segundo pool dentro de cada Function. Se `sslmode` não estiver presente, `sslmode=require` é aplicado automaticamente. Caracteres especiais da senha precisam ser codificados para URL; por exemplo, `@` deve ser escrito como `%40`.
+
+No primeiro cold start, as tabelas e índices ausentes são criados automaticamente. Para evoluções futuras de schema em produção, adote migrações versionadas com Alembic. Não use `/tmp/routemind.db`: isso faria o processo iniciar, mas contas e chaves desapareceriam ou divergiriam entre instâncias.

@@ -1,10 +1,11 @@
 import hmac
 import html
 import secrets
-import sqlite3
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+
+from app.services.database import DuplicateUserError
 
 router = APIRouter()
 
@@ -81,7 +82,7 @@ async def register(request: Request):
         return _with_status(_auth_form(request, True, "Sessão inválida. Recarregue a página."), 403)
     try:
         user = request.app.state.auth.register(str(form.get("email", "")), str(form.get("password", "")))
-    except sqlite3.IntegrityError:
+    except DuplicateUserError:
         return _auth_form(request, True, "Não foi possível criar a conta com esses dados.")
     except ValueError as exc:
         return _auth_form(request, True, str(exc))

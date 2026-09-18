@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -44,14 +45,20 @@ def create_app(openrouter_client=None, database=None) -> FastAPI:
         if not settings.secure_cookies:
             raise RuntimeError("ROUTEMIND_SECURE_COOKIES must be true in production")
     client = openrouter_client or OpenRouterClient(settings)
-    database = database or Database(settings.database_path)
+    database_connection = settings.database_connection
+    if os.getenv("VERCEL") and not database_connection.startswith(("postgres://", "postgresql://", "postgresql+")):
+        raise RuntimeError("A persistent PostgreSQL DATABASE_URL is required on Vercel; SQLite is not supported")
+    database = database or Database(database_connection)
     auth = AuthService(database, secret)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         database.initialize()
-        yield
-        await client.close()
+        try:
+            yield
+        finally:
+            database.close()
+            await client.close()
 
     app = FastAPI(title="RouteMind", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
