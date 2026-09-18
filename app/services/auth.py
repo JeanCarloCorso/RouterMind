@@ -22,13 +22,16 @@ class AuthService:
     def normalize_email(email: str) -> str:
         return email.strip().casefold()
 
-    def register(self, email: str, password: str) -> User:
+    def register(self, name: str, email: str, password: str) -> User:
+        clean_name = " ".join(name.strip().split())
+        if len(clean_name) < 2 or len(clean_name) > 120:
+            raise ValueError("Informe um nome entre 2 e 120 caracteres.")
         normalized = self.normalize_email(email)
         if "@" not in normalized or len(normalized) > 254:
             raise ValueError("Informe um e-mail válido.")
         if len(password) < 12 or len(password) > 256:
             raise ValueError("A senha deve ter entre 12 e 256 caracteres.")
-        return self.database.create_user(normalized, self.passwords.hash(password))
+        return self.database.create_user(clean_name, normalized, self.passwords.hash(password))
 
     def authenticate_password(self, email: str, password: str) -> User | None:
         user = self.database.get_user_by_email(self.normalize_email(email))

@@ -28,9 +28,11 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch):
     )
     try:
         register_page = await client.get("/register")
+        assert "name='name'" in register_page.text
+        assert "name='password_confirmation'" in register_page.text
         response = await client.post(
             "/register",
-            data={"csrf": csrf_from(register_page), "email": "alice@example.com", "password": "correct horse battery staple"},
+            data={"csrf": csrf_from(register_page), "name": "Alice Silva", "email": "alice@example.com", "password": "correct horse battery staple", "password_confirmation": "correct horse battery staple"},
             follow_redirects=True,
         )
         assert response.status_code == 200
@@ -38,6 +40,7 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch):
         assert "dashboard-grid" in response.text
         assert "Salvar chave" in response.text
         assert "Excluir chave OpenRouter" not in response.text
+        assert database.get_user(1).name == "Alice Silva"  # type: ignore[union-attr]
 
         csrf = csrf_from(response)
         response = await client.post(
@@ -123,10 +126,16 @@ async def test_csrf_confirmation_and_physical_key_deletion(monkeypatch):
     )
     try:
         page = await client.get("/register")
-        assert (await client.post("/register", data={"email": "bad@example.com", "password": "correct horse battery staple"})).status_code == 403
+        assert (await client.post("/register", data={"name": "Bob", "email": "bad@example.com", "password": "correct horse battery staple", "password_confirmation": "correct horse battery staple"})).status_code == 403
+        mismatch = await client.post(
+            "/register",
+            data={"csrf": csrf_from(page), "name": "Bob Souza", "email": "bob@example.com", "password": "correct horse battery staple", "password_confirmation": "different password"},
+        )
+        assert mismatch.status_code == 400
+        assert "As senhas não coincidem" in mismatch.text
         response = await client.post(
             "/register",
-            data={"csrf": csrf_from(page), "email": "bob@example.com", "password": "correct horse battery staple"},
+            data={"csrf": csrf_from(mismatch), "name": "Bob Souza", "email": "bob@example.com", "password": "correct horse battery staple", "password_confirmation": "correct horse battery staple"},
             follow_redirects=True,
         )
         csrf = csrf_from(response)
@@ -167,8 +176,8 @@ def test_api_keys_are_isolated_per_user():
     database = MemoryDatabase()
     database.initialize()
     auth = AuthService(database, "isolated-secret-with-at-least-32-characters")
-    alice = auth.register("alice@example.com", "alice-secure-password")
-    bob = auth.register("bob@example.com", "bob-secure-password")
+    alice = auth.register("Alice", "alice@example.com", "alice-secure-password")
+    bob = auth.register("Bob", "bob@example.com", "bob-secure-password")
     database.set_openrouter_key(alice.id, auth.encrypt_openrouter_key("sk-or-v1-alice-key"))
     database.set_openrouter_key(bob.id, auth.encrypt_openrouter_key("sk-or-v1-bob-key"))
     alice_route_key = auth.issue_api_key(alice.id, "Alice")
@@ -190,7 +199,7 @@ async def test_api_rejects_account_without_openrouter_key(monkeypatch):
     database = MemoryDatabase()
     database.initialize()
     auth = AuthService(database, secret)
-    user = auth.register("missing@example.com", "missing-secure-password")
+    user = auth.register("Missing User", "missing@example.com", "missing-secure-password")
     route_key = auth.issue_api_key(user.id, "Sem OpenRouter")
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_app(FakeOpenRouter([model("free/model")]), database)),

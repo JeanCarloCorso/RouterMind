@@ -1,13 +1,21 @@
 import hmac
 import html
 import secrets
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+import markdown
 
 from app.services.database import DuplicateUserError
 
 router = APIRouter()
+DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
+DOC_PAGES = {
+    "README.md": "Visão geral",
+    "chat-completions.md": "API de Chat Completions",
+    "examples.md": "Exemplos",
+}
 
 
 def _csrf(request: Request) -> str:
@@ -33,14 +41,20 @@ def _page(title: str, content: str) -> HTMLResponse:
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(title)} · RouteMind</title>
 <style>
-:root{{--bg:#080d19;--panel:#121a2b;--panel-2:#0e1627;--text:#eef4ff;--muted:#94a3b8;--accent:#38bdf8;--accent-2:#0ea5e9;--success:#4ade80;--danger:#fb7185;--border:#26334d;--shadow:0 18px 50px rgba(0,0,0,.24)}}
-*{{box-sizing:border-box}} body{{margin:0;min-height:100vh;background:radial-gradient(circle at 10% 0,#10213c 0,transparent 34%),var(--bg);color:var(--text);font:16px/1.5 Inter,ui-sans-serif,system-ui,sans-serif}}
-main{{width:min(1080px,calc(100% - 32px));margin:36px auto 64px}} .card{{background:linear-gradient(145deg,var(--panel),var(--panel-2));border:1px solid var(--border);border-radius:18px;padding:24px;box-shadow:var(--shadow)}}
-h1,h2,h3,p{{margin-top:0}} h1,h2{{line-height:1.2}} h1{{color:var(--accent);letter-spacing:-.03em}} h2{{font-size:1.18rem}} label{{display:block;margin:14px 0 6px;font-weight:650}} input{{width:100%;padding:12px 13px;border-radius:10px;border:1px solid var(--border);background:#091222;color:var(--text);outline:none}} input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(56,189,248,.13)}}
-button,.button{{display:inline-flex;align-items:center;justify-content:center;margin-top:16px;padding:10px 16px;border:1px solid transparent;border-radius:10px;background:var(--accent);color:#04111d;font-weight:750;text-decoration:none;cursor:pointer}} button:hover,.button:hover{{background:var(--accent-2);color:white}} .button.secondary,button.secondary{{background:transparent;color:var(--text);border-color:var(--border)}}
-.danger{{background:transparent!important;color:var(--danger)!important;border-color:rgba(251,113,133,.45)!important}} .muted{{color:var(--muted)}} .error{{color:var(--danger)}} code{{overflow-wrap:anywhere;color:#bae6fd}} table{{width:100%;border-collapse:collapse}} td,th{{padding:13px 8px;border-bottom:1px solid var(--border);text-align:left}} th{{color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.08em}} nav{{display:flex;justify-content:space-between;align-items:center;margin-bottom:28px}} nav h1{{margin:0}} form.inline{{display:inline}}
-.dashboard-grid{{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(280px,.85fr);gap:20px;margin:20px 0}} .stack{{display:grid;gap:20px}} .eyebrow{{margin:0 0 5px;color:var(--muted);font-size:.8rem;text-transform:uppercase;letter-spacing:.12em}} .welcome{{font-size:1.45rem;margin-bottom:4px}} .status-row{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0}} .badge{{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:6px 11px;font-size:.84rem;font-weight:750}} .badge.ok{{background:rgba(74,222,128,.12);color:var(--success);border:1px solid rgba(74,222,128,.25)}} .badge.off{{background:rgba(148,163,184,.1);color:var(--muted);border:1px solid var(--border)}} .dot{{width:7px;height:7px;border-radius:50%;background:currentColor}} .notice{{border-left:3px solid var(--accent);padding:12px 16px;background:rgba(56,189,248,.08);border-radius:8px}} .secret{{border-color:rgba(74,222,128,.4)}} .secret code{{display:block;padding:13px;background:#07101d;border-radius:9px}} .actions{{display:flex;gap:10px;align-items:center;flex-wrap:wrap}} .actions button{{margin-top:8px}} .checkbox{{display:flex;gap:9px;align-items:flex-start;color:var(--muted);font-size:.9rem}} .checkbox input{{width:auto;margin-top:4px}} .table-wrap{{overflow-x:auto}} .full{{grid-column:1/-1}}
-@media(max-width:760px){{main{{margin-top:22px}}.dashboard-grid{{grid-template-columns:1fr}}nav{{align-items:flex-start}}.card{{padding:19px}}td,th{{white-space:nowrap}}}}
+:root{{--bg:#070b14;--panel:#101827;--panel-2:#0b1220;--text:#f3f7ff;--muted:#97a6bc;--accent:#55d6be;--accent-2:#2ebca2;--violet:#8b7cf6;--success:#4ade80;--danger:#fb7185;--border:#22304a;--soft:#151f32;--shadow:0 22px 64px rgba(0,0,0,.28)}}
+*{{box-sizing:border-box}} body{{margin:0;min-height:100vh;background:radial-gradient(circle at 12% -5%,rgba(85,214,190,.1),transparent 25%),radial-gradient(circle at 95% 3%,rgba(139,124,246,.1),transparent 22%),var(--bg);color:var(--text);font:15px/1.6 Inter,ui-sans-serif,system-ui,sans-serif}} a{{color:var(--accent)}} main{{width:min(1160px,calc(100% - 32px));margin:26px auto 64px}}
+h1,h2,h3,p{{margin-top:0}} h1,h2,h3{{line-height:1.18;letter-spacing:-.025em}} h1{{font-size:clamp(1.9rem,4vw,2.7rem)}} h2{{font-size:1.18rem}} .muted{{color:var(--muted)}} .eyebrow{{margin:0 0 7px;color:var(--muted);font-size:.72rem;font-weight:760;text-transform:uppercase;letter-spacing:.14em}}
+.card{{background:linear-gradient(145deg,rgba(16,24,39,.98),rgba(11,18,32,.98));border:1px solid var(--border);border-radius:18px;padding:24px;box-shadow:var(--shadow)}} label{{display:block;margin:15px 0 7px;font-weight:680}} input{{width:100%;padding:12px 13px;border-radius:10px;border:1px solid var(--border);background:#080f1d;color:var(--text);outline:none;transition:.16s ease}} input:hover{{border-color:#344762}} input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(85,214,190,.12)}}
+button,.button{{display:inline-flex;align-items:center;justify-content:center;gap:7px;margin-top:15px;padding:10px 15px;border:1px solid transparent;border-radius:10px;background:var(--accent);color:#031511;font-weight:780;text-decoration:none;cursor:pointer;transition:.16s ease}} button:hover,.button:hover{{background:var(--accent-2);color:white;transform:translateY(-1px)}} .button.secondary,button.secondary{{background:transparent;color:var(--text);border-color:var(--border)}} .button.compact{{margin:0;padding:8px 12px}} .danger{{background:transparent!important;color:var(--danger)!important;border-color:rgba(251,113,133,.42)!important}}
+.brand{{display:flex;align-items:center;gap:10px;color:var(--text);font-size:1.02rem;font-weight:850;text-decoration:none}} .brand-mark{{display:grid;place-items:center;width:33px;height:33px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--violet));color:#06131a;font-weight:900}} .site-nav{{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:42px}} .nav-links{{display:flex;align-items:center;gap:7px}} .nav-link{{padding:8px 11px;border-radius:9px;color:var(--muted);font-weight:650;text-decoration:none}} .nav-link:hover{{background:var(--soft);color:var(--text)}}
+.home-shell{{max-width:900px;margin:10vh auto 0}} .home-heading{{max-width:720px}} .home-heading h1{{font-size:clamp(2.35rem,6vw,4.15rem);margin-bottom:17px}} .home-heading p{{max-width:620px;font-size:1.08rem;color:#b8c4d6}} .home-actions{{display:flex;gap:10px;flex-wrap:wrap;margin:26px 0 46px}} .home-actions .button{{margin:0}} .overview{{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}} .overview-item{{padding:20px;border:1px solid var(--border);border-radius:15px;background:rgba(12,19,33,.72)}} .overview-item strong{{display:block;margin-bottom:5px}} .overview-item span{{color:var(--muted);font-size:.9rem}}
+.auth-page{{max-width:430px;margin:6vh auto}} .auth-brand{{justify-content:center;margin-bottom:28px}} .auth-card{{padding:30px}} .auth-card h1{{font-size:1.65rem;margin-bottom:7px}} .auth-card button{{width:100%;margin-top:22px}} .auth-switch{{margin:22px 0 0;text-align:center;color:var(--muted)}} .form-hint{{font-size:.84rem;color:var(--muted);margin:7px 0 0}} .error-box{{margin:16px 0;padding:11px 13px;border:1px solid rgba(251,113,133,.35);background:rgba(251,113,133,.08);border-radius:10px;color:#fda4af}}
+.app-header{{display:flex;align-items:center;justify-content:space-between;gap:18px;padding-bottom:20px;border-bottom:1px solid var(--border);margin-bottom:30px}} .app-actions{{display:flex;align-items:center;gap:8px}} .app-actions form button{{margin:0}} .dashboard-head{{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px}} .dashboard-head h1{{margin-bottom:6px}} .stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:13px;margin-bottom:20px}} .stat{{padding:17px 19px;border:1px solid var(--border);border-radius:14px;background:rgba(12,19,33,.7)}} .stat span{{display:block;color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.08em}} .stat strong{{display:block;margin-top:6px;font-size:1.04rem}}
+.dashboard-grid{{display:grid;grid-template-columns:minmax(0,1.18fr) minmax(300px,.82fr);gap:18px;margin:18px 0}} .stack{{display:grid;gap:18px}} .full{{grid-column:1/-1}} .card-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}} .card-head h2{{margin-bottom:0}} .status-row{{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px 0}} .badge{{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:5px 9px;font-size:.78rem;font-weight:750}} .badge.ok{{background:rgba(74,222,128,.1);color:var(--success);border:1px solid rgba(74,222,128,.22)}} .badge.off{{background:rgba(148,163,184,.08);color:var(--muted);border:1px solid var(--border)}} .dot{{width:6px;height:6px;border-radius:50%;background:currentColor}}
+.notice{{margin:15px 0;border:1px solid rgba(85,214,190,.22);padding:12px 14px;background:rgba(85,214,190,.07);border-radius:10px}} .secret{{border-color:rgba(74,222,128,.35)}} .secret code{{display:block;padding:13px;background:#07101d;border-radius:9px}} code{{overflow-wrap:anywhere;color:#b9efe5}} .checkbox{{display:flex;gap:9px;align-items:flex-start;color:var(--muted);font-size:.88rem}} .checkbox input{{width:auto;margin-top:4px}} .actions{{display:flex;gap:9px;align-items:center;flex-wrap:wrap}} .actions button{{margin-top:8px}} form.inline{{display:inline}}
+.table-wrap{{overflow-x:auto}} table{{width:100%;border-collapse:collapse}} td,th{{padding:13px 9px;border-bottom:1px solid var(--border);text-align:left}} th{{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.09em}} tbody tr:last-child td{{border-bottom:0}}
+.docs-layout{{display:grid;grid-template-columns:230px minmax(0,1fr);gap:22px;align-items:start}} .docs-nav{{position:sticky;top:24px;padding:14px}} .docs-nav a{{display:block;padding:9px 10px;border-radius:8px;color:var(--muted);text-decoration:none}} .docs-nav a:hover,.docs-nav a.active{{background:var(--soft);color:var(--text)}} .docs-article{{min-width:0;padding:34px}} .docs-article h1{{margin-bottom:25px}} .docs-article h2{{margin-top:34px;padding-top:8px;border-top:1px solid var(--border)}} .docs-article h3{{margin-top:26px}} .docs-article p,.docs-article li{{color:#c0cada}} .docs-article pre{{overflow:auto;padding:16px;border:1px solid var(--border);border-radius:11px;background:#070d18}} .docs-article pre code{{color:#d8e2f0}} .docs-article :not(pre)>code{{padding:2px 5px;border-radius:5px;background:#172238}} .docs-article blockquote{{margin-left:0;padding-left:15px;border-left:3px solid var(--accent)}}
+@media(max-width:800px){{main{{margin-top:18px}}.overview,.stats{{grid-template-columns:1fr}}.dashboard-grid,.docs-layout{{grid-template-columns:1fr}}.docs-nav{{position:static}}.dashboard-head{{align-items:flex-start;flex-direction:column}}.card{{padding:20px}}td,th{{white-space:nowrap}}.site-nav{{margin-bottom:30px}}.nav-links .nav-link{{display:none}}}}
 </style></head><body><main>{content}</main></body></html>"""
     response = HTMLResponse(document)
     response.headers["Cache-Control"] = "no-store"
@@ -52,22 +66,67 @@ def _login_required(request: Request):
     return request.app.state.database.get_user(int(user_id)) if user_id else None
 
 
+def _public_header() -> str:
+    return """<header class='site-nav'><a class='brand' href='/'><span class='brand-mark'>R</span>RouteMind</a>
+<nav class='nav-links'><a class='nav-link' href='/docs/'>Documentação</a><a class='nav-link' href='/login'>Entrar</a><a class='button compact' href='/register'>Criar conta</a></nav></header>"""
+
+
 @router.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     if request.session.get("user_id"):
         return RedirectResponse("/dashboard", status_code=303)
-    return _page("Início", "<div class='card'><h1>RouteMind</h1><p>Gateway inteligente e seguro para sua conta OpenRouter.</p><a class='button' href='/login'>Entrar</a> <a class='button' href='/register'>Criar conta</a></div>")
+    return _page("Início", _public_header() + """<section class='home-shell'><div class='home-heading'><p class='eyebrow'>Gateway de modelos</p><h1>RouteMind</h1><p>Uma interface central para configurar sua credencial OpenRouter, emitir chaves de acesso e aplicar regras de seleção e custo por requisição.</p></div>
+<div class='home-actions'><a class='button' href='/login'>Acessar conta</a><a class='button secondary' href='/docs/'>Consultar documentação</a></div>
+<div class='overview'><div class='overview-item'><strong>Credenciais</strong><span>Chaves isoladas por usuário e armazenadas com proteção adequada.</span></div><div class='overview-item'><strong>Roteamento</strong><span>Seleção por capacidade, contexto, preferência e exclusão.</span></div><div class='overview-item'><strong>Custos</strong><span>Modo gratuito por padrão e teto estimado por chamada.</span></div></div></section>""")
+
+
+def _documentation_page(filename: str) -> HTMLResponse:
+    title = DOC_PAGES[filename]
+    source = (DOCS_DIR / filename).read_text(encoding="utf-8")
+    # Documentation is versioned with the application. Escape raw HTML before
+    # rendering so Markdown files cannot inject active markup into the UI.
+    article = markdown.markdown(html.escape(source), extensions=["extra", "sane_lists"])
+    navigation = "".join(
+        f"<a class='{'active' if page == filename else ''}' href='/docs/{page}'>{html.escape(label)}</a>"
+        for page, label in DOC_PAGES.items()
+    )
+    content = f"""<header class='app-header'><a class='brand' href='/'><span class='brand-mark'>R</span>RouteMind</a><div class='app-actions'><a class='nav-link' href='/'>Início</a><a class='button compact' href='/login'>Entrar</a></div></header>
+<div class='docs-layout'><aside class='card docs-nav'><p class='eyebrow'>Documentação</p>{navigation}</aside><article class='card docs-article'>{article}</article></div>"""
+    return _page(title, content)
+
+
+@router.get("/docs")
+async def documentation_redirect():
+    return RedirectResponse("/docs/", status_code=307)
+
+
+@router.get("/docs/")
+async def documentation_index():
+    return _documentation_page("README.md")
+
+
+@router.get("/docs/{filename}")
+async def documentation_page(filename: str):
+    if filename not in DOC_PAGES:
+        return _with_status(
+            _page("Documento não encontrado", "<div class='card'><h1>Documento não encontrado</h1><a class='button secondary' href='/docs/'>Voltar</a></div>"),
+            404,
+        )
+    return _documentation_page(filename)
 
 
 def _auth_form(request: Request, register: bool, error: str = "") -> HTMLResponse:
     action, heading = ("/register", "Criar conta") if register else ("/login", "Entrar")
-    password_help = "<p class='muted'>Use pelo menos 12 caracteres.</p>" if register else ""
-    error_html = f"<p class='error'>{html.escape(error)}</p>" if error else ""
+    name_field = "<label for='name'>Nome</label><input id='name' name='name' type='text' autocomplete='name' required minlength='2' maxlength='120' placeholder='Seu nome'>" if register else ""
+    confirmation = "<label for='password-confirmation'>Repita a senha</label><input id='password-confirmation' name='password_confirmation' type='password' autocomplete='new-password' required minlength='12' maxlength='256'>" if register else ""
+    password_help = "<p class='form-hint'>Use entre 12 e 256 caracteres.</p>" if register else ""
+    error_html = f"<div class='error-box' role='alert'>{html.escape(error)}</div>" if error else ""
     switch = "Já possui conta? <a href='/login'>Entrar</a>" if register else "Ainda não possui conta? <a href='/register'>Criar conta</a>"
-    return _page(heading, f"""<div class='card'><h1>{heading}</h1>{error_html}<form method='post' action='{action}'>
-<input type='hidden' name='csrf' value='{_csrf(request)}'><label for='email'>E-mail</label><input id='email' name='email' type='email' autocomplete='email' required maxlength='254'>
+    return _page(heading, f"""<div class='auth-page'><a class='brand auth-brand' href='/'><span class='brand-mark'>R</span>RouteMind</a>
+<section class='card auth-card'><p class='eyebrow'>{'Cadastro' if register else 'Acesso'}</p><h1>{heading}</h1><p class='muted'>{'Informe seus dados para criar a conta.' if register else 'Entre para acessar suas credenciais e configurações.'}</p>{error_html}<form method='post' action='{action}'>
+<input type='hidden' name='csrf' value='{_csrf(request)}'>{name_field}<label for='email'>E-mail</label><input id='email' name='email' type='email' autocomplete='email' required maxlength='254' placeholder='voce@empresa.com'>
 <label for='password'>Senha</label><input id='password' name='password' type='password' autocomplete='{'new-password' if register else 'current-password'}' required minlength='12' maxlength='256'>{password_help}
-<button type='submit'>{heading}</button></form><p class='muted'>{switch}</p></div>""")
+{confirmation}<button type='submit'>{heading}</button></form><p class='auth-switch'>{switch}</p></section></div>""")
 
 
 @router.get("/register")
@@ -80,8 +139,13 @@ async def register(request: Request):
     form = await request.form()
     if not _check_csrf(request, str(form.get("csrf", ""))):
         return _with_status(_auth_form(request, True, "Sessão inválida. Recarregue a página."), 403)
+    password = str(form.get("password", ""))
+    if not hmac.compare_digest(password, str(form.get("password_confirmation", ""))):
+        return _with_status(_auth_form(request, True, "As senhas não coincidem."), 400)
     try:
-        user = request.app.state.auth.register(str(form.get("email", "")), str(form.get("password", "")))
+        user = request.app.state.auth.register(
+            str(form.get("name", "")), str(form.get("email", "")), password
+        )
     except DuplicateUserError:
         return _auth_form(request, True, "Não foi possível criar a conta com esses dados.")
     except ValueError as exc:
@@ -116,30 +180,31 @@ def _dashboard(request: Request, user, revealed_key: str | None = None, message:
     rows = request.app.state.database.list_api_keys(user.id)
     active_count = len(rows)
     key_rows = "".join(
-        f"<tr><td><strong>{html.escape(row['label'])}</strong></td><td><code>{html.escape(row['key_prefix'])}…</code></td><td><span class='badge ok'><span class='dot'></span>Ativa</span></td><td><a class='button danger' href='/keys/{row['id']}/delete'>Excluir</a></td></tr>"
+        f"<tr><td><strong>{html.escape(row['label'])}</strong></td><td><code>{html.escape(row['key_prefix'])}…</code></td><td><span class='badge ok'><span class='dot'></span>Ativa</span></td><td><a class='button danger compact' href='/keys/{row['id']}/delete'>Excluir</a></td></tr>"
         for row in rows
     ) or "<tr><td colspan='4' class='muted'>Nenhuma chave criada.</td></tr>"
     revealed = f"<div class='card secret'><p class='eyebrow'>Nova credencial</p><h2>Copie sua chave RouteMind agora</h2><p class='muted'>Por segurança, ela não será exibida novamente.</p><code>{html.escape(revealed_key)}</code></div>" if revealed_key else ""
     notice = f"<div class='notice'>{html.escape(message)}</div>" if message else ""
     if user.openrouter_key_encrypted:
-        openrouter_card = f"""<div class='card'><p class='eyebrow'>Credencial do provedor</p><h2>Chave OpenRouter</h2>
-<div class='status-row'><span class='badge ok'><span class='dot'></span>Configurada</span><span class='muted'>Pronta para encaminhar requisições.</span></div>
+        openrouter_card = f"""<div class='card'><div class='card-head'><div><p class='eyebrow'>Credencial do provedor</p><h2>Chave OpenRouter</h2></div><span class='badge ok'><span class='dot'></span>Configurada</span></div>
+<p class='muted'>Pronta para encaminhar requisições.</p>
 <p class='muted'>A chave está criptografada e não pode ser visualizada. Para cadastrar outra, exclua primeiro a credencial atual.</p>
 <form method='post' action='/openrouter-key/delete'><input type='hidden' name='csrf' value='{csrf}'>
 <label class='checkbox'><input type='checkbox' name='confirm' value='yes' required><span>Confirmo que as chamadas da API deixarão de funcionar até uma nova chave ser cadastrada.</span></label>
 <button type='submit' class='danger'>Excluir chave OpenRouter</button></form></div>"""
     else:
-        openrouter_card = f"""<div class='card'><p class='eyebrow'>Credencial do provedor</p><h2>Chave OpenRouter</h2>
-<div class='status-row'><span class='badge off'><span class='dot'></span>Não configurada</span></div>
+        openrouter_card = f"""<div class='card'><div class='card-head'><div><p class='eyebrow'>Credencial do provedor</p><h2>Chave OpenRouter</h2></div><span class='badge off'><span class='dot'></span>Não configurada</span></div>
 <p class='muted'>Cadastre uma única chave pessoal. Ela será criptografada e não voltará a ser exibida.</p>
 <form method='post' action='/openrouter-key'><input type='hidden' name='csrf' value='{csrf}'>
 <label for='or-key'>Chave pessoal OpenRouter</label><input id='or-key' name='openrouter_key' type='password' autocomplete='off' placeholder='sk-or-v1-…' required>
 <button type='submit'>Salvar chave</button></form></div>"""
-    content = f"""<nav><div><p class='eyebrow'>Painel</p><h1>RouteMind</h1></div><form method='post' action='/logout'><input type='hidden' name='csrf' value='{csrf}'><button type='submit' class='secondary'>Sair</button></form></nav>
-<section><p class='eyebrow'>Conta</p><h2 class='welcome'>Olá, {html.escape(user.email)}</h2><p class='muted'>{active_count} chave{'s' if active_count != 1 else ''} RouteMind ativa{'s' if active_count != 1 else ''}</p></section>{notice}{revealed}
+    provider_status = "Configurada" if user.openrouter_key_encrypted else "Pendente"
+    content = f"""<header class='app-header'><a class='brand' href='/dashboard'><span class='brand-mark'>R</span>RouteMind</a><div class='app-actions'><a class='nav-link' href='/docs/'>Documentação</a><form method='post' action='/logout'><input type='hidden' name='csrf' value='{csrf}'><button type='submit' class='secondary compact'>Sair</button></form></div></header>
+<section class='dashboard-head'><div><p class='eyebrow'>Dashboard</p><h1>Olá, {html.escape(user.name)}</h1><p class='muted'>{html.escape(user.email)}</p></div></section>
+<section class='stats'><div class='stat'><span>OpenRouter</span><strong>{provider_status}</strong></div><div class='stat'><span>Chaves RouteMind</span><strong>{active_count} ativa{'s' if active_count != 1 else ''}</strong></div><div class='stat'><span>Política padrão</span><strong>Somente gratuitos</strong></div></section>{notice}{revealed}
 <div class='dashboard-grid'><div class='stack'>{openrouter_card}</div>
-<div class='card'><p class='eyebrow'>Acesso à API</p><h2>Gerar chave RouteMind</h2><p class='muted'>Use esta chave como Bearer token nas suas aplicações.</p><form method='post' action='/keys'><input type='hidden' name='csrf' value='{csrf}'><label for='label'>Identificação</label><input id='label' name='label' maxlength='80' placeholder='Produção' required><button type='submit'>Gerar nova chave</button></form></div>
-<div class='card full'><p class='eyebrow'>Credenciais de acesso</p><h2>Chaves RouteMind</h2><div class='table-wrap'><table><thead><tr><th>Nome</th><th>Prefixo</th><th>Status</th><th>Ação</th></tr></thead><tbody>{key_rows}</tbody></table></div></div></div>"""
+<div class='card'><div class='card-head'><div><p class='eyebrow'>Acesso à API</p><h2>Gerar chave RouteMind</h2></div></div><p class='muted'>Crie um Bearer token para uma aplicação ou ambiente.</p><form method='post' action='/keys'><input type='hidden' name='csrf' value='{csrf}'><label for='label'>Identificação</label><input id='label' name='label' maxlength='80' placeholder='Ex.: Produção' required><button type='submit'>Gerar chave</button></form></div>
+<div class='card full'><div class='card-head'><div><p class='eyebrow'>Credenciais de acesso</p><h2>Chaves RouteMind</h2></div><span class='muted'>{active_count} no total</span></div><div class='table-wrap'><table><thead><tr><th>Nome</th><th>Prefixo</th><th>Status</th><th>Ação</th></tr></thead><tbody>{key_rows}</tbody></table></div></div></div>"""
     return _page("Painel", content)
 
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Column, ForeignKey, Index, Integer, MetaData, String, Table, Text, create_engine, delete, insert, select, update
+from sqlalchemy import Column, ForeignKey, Index, Integer, MetaData, String, Table, Text, create_engine, delete, insert, select, text, update
 from sqlalchemy.engine import Engine, URL, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool
@@ -15,6 +15,7 @@ users = Table(
     "users",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String(120), nullable=False),
     Column("email", String(254), nullable=False, unique=True),
     Column("password_hash", Text, nullable=False),
     Column("openrouter_key_encrypted", Text),
@@ -43,6 +44,7 @@ class DuplicateUserError(Exception):
 @dataclass(frozen=True)
 class User:
     id: int
+    name: str
     email: str
     password_hash: str
     openrouter_key_encrypted: str | None
@@ -91,6 +93,11 @@ class Database:
         with self._lock:
             metadata.create_all(self.engine)
             with self.engine.begin() as connection:
+                connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(120)"))
+                connection.execute(
+                    text("UPDATE users SET name = split_part(email, '@', 1) WHERE name IS NULL OR name = ''")
+                )
+                connection.execute(text("ALTER TABLE users ALTER COLUMN name SET NOT NULL"))
                 connection.execute(delete(api_keys).where(api_keys.c.revoked_at.is_not(None)))
 
     def close(self) -> None:
@@ -98,13 +105,13 @@ class Database:
 
     @staticmethod
     def _user(row: Mapping[str, Any] | None) -> User | None:
-        return User(row["id"], row["email"], row["password_hash"], row["openrouter_key_encrypted"]) if row else None
+        return User(row["id"], row["name"], row["email"], row["password_hash"], row["openrouter_key_encrypted"]) if row else None
 
-    def create_user(self, email: str, password_hash: str) -> User:
+    def create_user(self, name: str, email: str, password_hash: str) -> User:
         try:
             with self._lock, self.engine.begin() as connection:
                 user_id = connection.execute(
-                    insert(users).values(email=email, password_hash=password_hash, created_at=datetime.now(UTC).isoformat()).returning(users.c.id)
+                    insert(users).values(name=name, email=email, password_hash=password_hash, created_at=datetime.now(UTC).isoformat()).returning(users.c.id)
                 ).scalar_one()
                 row = connection.execute(select(users).where(users.c.id == user_id)).mappings().first()
         except IntegrityError as exc:

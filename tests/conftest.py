@@ -35,10 +35,10 @@ class MemoryDatabase:
     def close(self):
         pass
 
-    def create_user(self, email: str, password_hash: str) -> User:
+    def create_user(self, name: str, email: str, password_hash: str) -> User:
         if any(user.email == email for user in self.users.values()):
             raise DuplicateUserError
-        user = User(self._next_user_id, email, password_hash, None)
+        user = User(self._next_user_id, name, email, password_hash, None)
         self.users[user.id] = user
         self._next_user_id += 1
         return user
@@ -51,13 +51,13 @@ class MemoryDatabase:
 
     def set_openrouter_key(self, user_id: int, encrypted_key: str) -> None:
         user = self.users[user_id]
-        self.users[user_id] = User(user.id, user.email, user.password_hash, encrypted_key)
+        self.users[user_id] = User(user.id, user.name, user.email, user.password_hash, encrypted_key)
 
     def delete_openrouter_key(self, user_id: int) -> bool:
         user = self.users[user_id]
         if user.openrouter_key_encrypted is None:
             return False
-        self.users[user_id] = User(user.id, user.email, user.password_hash, None)
+        self.users[user_id] = User(user.id, user.name, user.email, user.password_hash, None)
         return True
 
     def create_api_key(self, user_id: int, label: str, prefix: str, key_hash: str) -> int:
@@ -151,7 +151,7 @@ async def make_client(monkeypatch):
         database = MemoryDatabase()
         database.initialize()
         auth = AuthService(database, secret)
-        user = auth.register(f"user-{len(clients)}@example.com", "a-secure-test-password")
+        user = auth.register("Test User", f"user-{len(clients)}@example.com", "a-secure-test-password")
         database.set_openrouter_key(user.id, auth.encrypt_openrouter_key(TEST_OPENROUTER_KEY))
         database.create_api_key(user.id, "Test", TEST_ROUTE_KEY[:16], auth._api_hash(TEST_ROUTE_KEY))
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(fake, database)), base_url="http://test")

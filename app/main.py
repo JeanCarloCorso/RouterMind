@@ -57,7 +57,7 @@ def create_app(openrouter_client=None, database=None) -> FastAPI:
             database.close()
             await client.close()
 
-    app = FastAPI(title="RouteMind", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="RouteMind", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.add_middleware(
         SessionMiddleware,
         secret_key=secret,

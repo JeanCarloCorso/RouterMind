@@ -23,7 +23,7 @@ uvicorn app.main:app --reload
 Depois:
 
 1. Abra `http://localhost:8000/register`.
-2. Crie sua conta com uma senha de pelo menos 12 caracteres.
+2. Crie sua conta informando nome, e-mail, senha e confirmação da senha.
 3. Cadastre sua chave pessoal da OpenRouter no painel.
 4. Gere uma chave RouteMind e copie-a imediatamente; ela será exibida uma única vez.
 5. Use essa chave como Bearer token em `POST /api/v1/chat/completions`.
@@ -43,13 +43,20 @@ Depois:
 - chaves RouteMind armazenadas somente como HMAC e chaves OpenRouter criptografadas em repouso;
 - testes com mocks, sem cobranças reais.
 
-## Contrato de compatibilidade
+## Documentação da API
 
-As referências são a documentação oficial de [Chat Completions](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request) e do [catálogo de modelos](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties).
+A referência completa fica na pasta [`docs/`](docs/README.md):
 
-`messages` é o campo de corpo obrigatório. `model` é opcional na OpenRouter e no RouteMind. Se vier preenchido, o gateway não o troca silenciosamente: valida custo/capacidade e o usa ou retorna erro. Se omitido, faz a seleção automática.
+- [comportamento de `POST /api/v1/chat/completions`](docs/chat-completions.md), incluindo autenticação, campos interpretados pelo gateway, parâmetros `routemind`, roteamento, custos, fallback e erros;
+- [exemplos de requisições e respostas do RouteMind](docs/examples.md), incluindo modo gratuito, teto por chamada, seleção explícita, tools, resposta estruturada e streaming.
 
-O objeto `routemind` evita colisões com campos atuais ou futuros da OpenRouter e nunca é encaminhado. Todos os outros campos JSON são repassados. A validação local se limita ao necessário para segurança/roteamento; o upstream continua sendo a autoridade para parâmetros específicos de cada modelo.
+Essa documentação descreve apenas garantias e comportamentos implementados pelo RouteMind, sem reproduzir a documentação do serviço upstream.
+
+## Compatibilidade do gateway
+
+`messages` é o campo obrigatório para o RouteMind. `model` é opcional: se vier preenchido, o gateway não o troca silenciosamente; valida custo/capacidade e o usa ou retorna erro. Se omitido, faz a seleção automática.
+
+O objeto `routemind` concentra a política local e nunca é encaminhado. Os outros campos JSON são preservados quando o preflight pode ser feito com segurança. A validação local se limita ao necessário para segurança, custo e roteamento.
 
 ### Isolamento por usuário
 
@@ -64,6 +71,120 @@ rm_live_... → HMAC indexado → usuário → chave OpenRouter descriptografada
 O token `rm_live_...` nunca é encaminhado à OpenRouter. A chave OpenRouter nunca é devolvida pela API nem pelo painel.
 
 Respostas e erros do upstream não são remodelados. Isso preserva `id`, `object`, `created`, `model`, `choices`, `usage` e extensões. Em streaming, os bytes SSE e `[DONE]` são retransmitidos sem reconstrução.
+
+## Endpoint `POST /api/v1/chat/completions`
+
+Use a chave RouteMind gerada no dashboard como Bearer token. Não envie sua chave OpenRouter diretamente: o gateway identifica o usuário pela chave `rm_live_...` e utiliza internamente a credencial OpenRouter cadastrada nessa conta.
+
+### Requisição mínima
+
+Sem `model` nem `routemind`, o RouteMind seleciona automaticamente apenas modelos gratuitos:
+
+```bash
+curl https://seu-dominio.vercel.app/api/v1/chat/completions \
+  -H 'Authorization: Bearer rm_live_SUA_CHAVE' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "Explique o que é uma API REST."}
+    ]
+  }'
+```
+
+`messages` é obrigatório, deve ser um array não vazio e cada item deve possuir `role` e `content`. Os demais campos compatíveis com Chat Completions, como `temperature`, `max_tokens`, `max_completion_tokens`, `top_p`, `tools`, `tool_choice`, `response_format`, `stop` e `seed`, são encaminhados ao upstream quando aplicáveis.
+
+### Modelo específico e controle de custo
+
+```bash
+curl https://seu-dominio.vercel.app/api/v1/chat/completions \
+  -H 'Authorization: Bearer rm_live_SUA_CHAVE' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "provider/model",
+    "messages": [{"role": "user", "content": "Revise este algoritmo."}],
+    "temperature": 0.2,
+    "max_completion_tokens": 800,
+    "routemind": {
+      "free_only": false,
+      "max_cost": 0.02,
+      "currency": "USD",
+      "task_type": "coding",
+      "fallback_enabled": false
+    }
+  }'
+```
+
+O campo local `routemind` é removido antes do encaminhamento. Quando `model` é informado, ele é validado contra capacidade e custo e não é substituído silenciosamente.
+
+### Exemplo de resposta
+
+O corpo bem-sucedido mantém o formato retornado pela OpenRouter:
+
+```json
+{
+  "id": "gen-abc123",
+  "object": "chat.completion",
+  "created": 1789731377,
+  "model": "provider/model:free",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "Uma API REST é..."
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 18,
+    "completion_tokens": 42,
+    "total_tokens": 60,
+    "cost": 0
+  }
+}
+```
+
+Campos adicionais enviados pela OpenRouter podem aparecer na resposta. O modelo efetivamente escolhido é informado em `model`; o consumo e o custo real, quando disponibilizados pelo upstream, aparecem em `usage`.
+
+### Streaming SSE
+
+Envie `"stream": true` e leia eventos `data:` até `[DONE]`:
+
+```bash
+curl --no-buffer https://seu-dominio.vercel.app/api/v1/chat/completions \
+  -H 'Authorization: Bearer rm_live_SUA_CHAVE' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "stream": true,
+    "messages": [{"role": "user", "content": "Resuma computação quântica."}]
+  }'
+```
+
+Exemplo abreviado:
+
+```text
+data: {"id":"gen-abc123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Computação"}}]}
+
+data: {"id":"gen-abc123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" quântica"}}]}
+
+data: [DONE]
+```
+
+### Erros
+
+Erros gerados pelo RouteMind seguem um envelope JSON estável:
+
+```json
+{
+  "error": {
+    "message": "messages is required and must be a non-empty array",
+    "code": "invalid_request"
+  }
+}
+```
+
+Respostas comuns incluem `400` para JSON/configuração inválida, `401` para chave RouteMind inválida, `403` quando a conta não possui chave OpenRouter, `429` para rate limit, `502` para falha de comunicação com o upstream e `504` para timeout. Erros HTTP recebidos da OpenRouter são preservados sempre que possível.
 
 ## Semântica financeira
 
@@ -169,6 +290,8 @@ Antes de iniciar, configure uma URL PostgreSQL em `ROUTEMIND_DATABASE_URL`. Depo
 | `GET` | `/keys/{id}/delete` | sessão | exibir a confirmação de exclusão |
 | `POST` | `/keys/{id}/delete` | sessão + CSRF | excluir permanentemente a chave RouteMind e seus metadados |
 | `POST` | `/logout` | sessão + CSRF | encerrar a sessão |
+| `GET` | `/docs/` | pública | documentação HTML renderizada a partir dos arquivos Markdown de `docs/` |
+| `GET` | `/docs/{arquivo}.md` | pública | exibir um documento permitido da pasta `docs/` |
 | `POST` | `/api/v1/chat/completions` | Bearer `rm_live_...` | proxy inteligente da OpenRouter |
 | `GET` | `/health` | pública | verificação de saúde |
 
