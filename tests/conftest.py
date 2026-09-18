@@ -1,16 +1,104 @@
+import os
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
 
+os.environ.setdefault(
+    "ROUTEMIND_DATABASE_URL",
+    "postgresql://test:test@localhost:5432/routemind_test",
+)
+
 from app.main import create_app
 from app.services.auth import AuthService
-from app.services.database import Database
+from app.services.database import DuplicateUserError, User
 
 TEST_ROUTE_KEY = "rm_live_test_key_with_more_than_32_characters"
 TEST_OPENROUTER_KEY = "sk-or-v1-user-specific-test-key"
+
+
+class MemoryDatabase:
+    """Test repository with no external database dependency."""
+
+    def __init__(self):
+        self.users: dict[int, User] = {}
+        self.keys: dict[int, dict[str, Any]] = {}
+        self._next_user_id = 1
+        self._next_key_id = 1
+
+    def initialize(self):
+        pass
+
+    def close(self):
+        pass
+
+    def create_user(self, email: str, password_hash: str) -> User:
+        if any(user.email == email for user in self.users.values()):
+            raise DuplicateUserError
+        user = User(self._next_user_id, email, password_hash, None)
+        self.users[user.id] = user
+        self._next_user_id += 1
+        return user
+
+    def get_user_by_email(self, email: str) -> User | None:
+        return next((user for user in self.users.values() if user.email == email), None)
+
+    def get_user(self, user_id: int) -> User | None:
+        return self.users.get(user_id)
+
+    def set_openrouter_key(self, user_id: int, encrypted_key: str) -> None:
+        user = self.users[user_id]
+        self.users[user_id] = User(user.id, user.email, user.password_hash, encrypted_key)
+
+    def delete_openrouter_key(self, user_id: int) -> bool:
+        user = self.users[user_id]
+        if user.openrouter_key_encrypted is None:
+            return False
+        self.users[user_id] = User(user.id, user.email, user.password_hash, None)
+        return True
+
+    def create_api_key(self, user_id: int, label: str, prefix: str, key_hash: str) -> int:
+        key_id = self._next_key_id
+        self._next_key_id += 1
+        self.keys[key_id] = {
+            "id": key_id,
+            "user_id": user_id,
+            "label": label,
+            "key_prefix": prefix,
+            "key_hash": key_hash,
+            "created_at": datetime.now(UTC).isoformat(),
+            "last_used_at": None,
+            "revoked_at": None,
+        }
+        return key_id
+
+    def list_api_keys(self, user_id: int):
+        return sorted(
+            (key.copy() for key in self.keys.values() if key["user_id"] == user_id),
+            key=lambda key: key["id"],
+            reverse=True,
+        )
+
+    def get_api_key(self, user_id: int, key_id: int):
+        key = self.keys.get(key_id)
+        return key.copy() if key and key["user_id"] == user_id else None
+
+    def delete_api_key(self, user_id: int, key_id: int) -> bool:
+        key = self.keys.get(key_id)
+        if not key or key["user_id"] != user_id:
+            return False
+        del self.keys[key_id]
+        return True
+
+    def find_user_by_api_hash(self, key_hash: str) -> User | None:
+        key = next((key for key in self.keys.values() if key["key_hash"] == key_hash), None)
+        if not key:
+            return None
+        key["last_used_at"] = datetime.now(UTC).isoformat()
+        return self.users.get(key["user_id"])
 
 
 def model(model_id: str, prompt: str = "0", completion: str = "0", supported=None, inputs=None) -> dict[str, Any]:
@@ -52,7 +140,7 @@ class FakeOpenRouter:
 
 
 @pytest_asyncio.fixture
-async def make_client(monkeypatch, tmp_path):
+async def make_client(monkeypatch):
     secret = "test-secret-key-with-at-least-32-characters"
     monkeypatch.setenv("ROUTEMIND_SECRET_KEY", secret)
     from app.core.config import get_settings
@@ -60,7 +148,7 @@ async def make_client(monkeypatch, tmp_path):
     clients = []
     def factory(models, responses=None):
         fake = FakeOpenRouter(models, responses)
-        database = Database(str(tmp_path / f"test-{len(clients)}.db"))
+        database = MemoryDatabase()
         database.initialize()
         auth = AuthService(database, secret)
         user = auth.register(f"user-{len(clients)}@example.com", "a-secure-test-password")

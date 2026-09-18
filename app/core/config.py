@@ -10,7 +10,6 @@ class Settings(BaseSettings):
 
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     secret_key: SecretStr = SecretStr("development-only-change-me-at-least-32-chars")
-    database_path: str = "routemind.db"
     database_url: SecretStr | None = None
     environment: str = "development"
     secure_cookies: bool = False
@@ -27,7 +26,12 @@ class Settings(BaseSettings):
     def database_connection(self) -> str:
         if self.database_url:
             return self.database_url.get_secret_value()
-        return os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or self.database_path
+        database_url = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+        if not database_url:
+            raise RuntimeError(
+                "PostgreSQL is required; configure ROUTEMIND_DATABASE_URL, DATABASE_URL, or POSTGRES_URL"
+            )
+        return database_url
 
 @lru_cache
 def get_settings() -> Settings:

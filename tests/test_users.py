@@ -1,13 +1,11 @@
 import re
-import sqlite3
 
 import httpx
 
 from app.core.config import get_settings
 from app.main import create_app
-from app.services.database import Database
 from app.services.auth import AuthService
-from conftest import FakeOpenRouter, model
+from conftest import FakeOpenRouter, MemoryDatabase, model
 
 
 def csrf_from(response: httpx.Response) -> str:
@@ -16,12 +14,12 @@ def csrf_from(response: httpx.Response) -> str:
     return match.group(1)
 
 
-async def test_account_to_personal_openrouter_key_flow(monkeypatch, tmp_path):
+async def test_account_to_personal_openrouter_key_flow(monkeypatch):
     monkeypatch.setenv("ROUTEMIND_SECRET_KEY", "integration-secret-at-least-32-characters")
     monkeypatch.setenv("ROUTEMIND_ENVIRONMENT", "development")
     monkeypatch.setenv("ROUTEMIND_SECURE_COOKIES", "false")
     get_settings.cache_clear()
-    database = Database(str(tmp_path / "users.db"))
+    database = MemoryDatabase()
     database.initialize()
     upstream = FakeOpenRouter([model("free/model")])
     client = httpx.AsyncClient(
@@ -112,12 +110,12 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch, tmp_path):
         get_settings.cache_clear()
 
 
-async def test_csrf_confirmation_and_physical_key_deletion(monkeypatch, tmp_path):
+async def test_csrf_confirmation_and_physical_key_deletion(monkeypatch):
     monkeypatch.setenv("ROUTEMIND_SECRET_KEY", "integration-secret-at-least-32-characters")
     monkeypatch.setenv("ROUTEMIND_ENVIRONMENT", "development")
     monkeypatch.setenv("ROUTEMIND_SECURE_COOKIES", "false")
     get_settings.cache_clear()
-    database = Database(str(tmp_path / "security.db"))
+    database = MemoryDatabase()
     database.initialize()
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_app(FakeOpenRouter([model("free/model")]), database)),
@@ -165,8 +163,8 @@ async def test_csrf_confirmation_and_physical_key_deletion(monkeypatch, tmp_path
         get_settings.cache_clear()
 
 
-def test_api_keys_are_isolated_per_user(tmp_path):
-    database = Database(str(tmp_path / "isolation.db"))
+def test_api_keys_are_isolated_per_user():
+    database = MemoryDatabase()
     database.initialize()
     auth = AuthService(database, "isolated-secret-with-at-least-32-characters")
     alice = auth.register("alice@example.com", "alice-secure-password")
@@ -183,26 +181,13 @@ def test_api_keys_are_isolated_per_user(tmp_path):
     assert auth.authenticate_api_key("rm_live_unknown_but_long_enough_to_validate") is None
 
 
-def test_legacy_revoked_keys_are_purged_on_initialization(tmp_path):
-    path = str(tmp_path / "legacy.db")
-    database = Database(path)
-    database.initialize()
-    auth = AuthService(database, "legacy-secret-with-at-least-32-characters")
-    user = auth.register("legacy@example.com", "legacy-secure-password")
-    auth.issue_api_key(user.id, "Antiga")
-    with sqlite3.connect(path) as connection:
-        connection.execute("UPDATE api_keys SET revoked_at = '2026-01-01T00:00:00Z'")
-    database.initialize()
-    assert database.list_api_keys(user.id) == []
-
-
-async def test_api_rejects_account_without_openrouter_key(monkeypatch, tmp_path):
+async def test_api_rejects_account_without_openrouter_key(monkeypatch):
     secret = "missing-key-secret-with-at-least-32-characters"
     monkeypatch.setenv("ROUTEMIND_SECRET_KEY", secret)
     monkeypatch.setenv("ROUTEMIND_ENVIRONMENT", "development")
     monkeypatch.setenv("ROUTEMIND_SECURE_COOKIES", "false")
     get_settings.cache_clear()
-    database = Database(str(tmp_path / "missing-key.db"))
+    database = MemoryDatabase()
     database.initialize()
     auth = AuthService(database, secret)
     user = auth.register("missing@example.com", "missing-secure-password")

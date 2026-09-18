@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.config import get_settings
 from app.services.database import Database
 from sqlalchemy.pool import NullPool
@@ -18,6 +20,24 @@ def test_unprefixed_database_url_is_supported(monkeypatch):
     get_settings.cache_clear()
     try:
         assert get_settings().database_connection.startswith("postgresql://")
+    finally:
+        get_settings.cache_clear()
+
+
+def test_database_rejects_non_postgres_connections():
+    with pytest.raises(ValueError, match="requires a PostgreSQL"):
+        Database("local.db")
+
+
+def test_database_url_is_required(monkeypatch, tmp_path):
+    monkeypatch.delenv("ROUTEMIND_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("POSTGRES_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match="PostgreSQL is required"):
+            get_settings().database_connection
     finally:
         get_settings.cache_clear()
 

@@ -124,7 +124,7 @@ app/
 └── services/
     ├── openrouter_client.py
     ├── auth.py                # Argon2, HMAC e criptografia
-    ├── database.py            # repositório PostgreSQL/SQLite via SQLAlchemy
+    ├── database.py            # repositório PostgreSQL via SQLAlchemy
     ├── model_catalog.py
     ├── task_classifier.py
     ├── model_router.py
@@ -150,10 +150,10 @@ Docker:
 
 ```bash
 docker build -t routemind .
-docker run --rm -p 8000:8000 --env-file .env -v routemind-data:/app/data routemind
+docker run --rm -p 8000:8000 --env-file .env routemind
 ```
 
-Depois de iniciar, abra `http://localhost:8000/register`, crie a conta, cadastre sua chave OpenRouter e gere uma chave RouteMind. Para o volume Docker acima, configure `ROUTEMIND_DATABASE_PATH=/app/data/routemind.db`.
+Antes de iniciar, configure uma URL PostgreSQL em `ROUTEMIND_DATABASE_URL`. Depois, abra `http://localhost:8000/register`, crie a conta, cadastre sua chave OpenRouter e gere uma chave RouteMind.
 
 ### Endpoints
 
@@ -177,8 +177,7 @@ Depois de iniciar, abra `http://localhost:8000/register`, crie a conta, cadastre
 | Variável | Padrão | Finalidade |
 |---|---:|---|
 | `ROUTEMIND_SECRET_KEY` | inseguro para desenvolvimento | assina sessões, HMAC das API keys e deriva a chave de criptografia |
-| `ROUTEMIND_DATABASE_PATH` | `routemind.db` | banco SQLite persistente |
-| `ROUTEMIND_DATABASE_URL` | vazio | URL PostgreSQL; tem precedência sobre `DATABASE_PATH` |
+| `ROUTEMIND_DATABASE_URL` | obrigatório | URL de conexão PostgreSQL |
 | `ROUTEMIND_ENVIRONMENT` | `development` | use `production` em produção |
 | `ROUTEMIND_SECURE_COOKIES` | `false` | exige cookie HTTPS; obrigatório em produção |
 | `ROUTEMIND_OPENROUTER_BASE_URL` | URL oficial | upstream |
@@ -249,7 +248,7 @@ A suíte cobre cadastro, login, CSRF, criptografia, emissão e exclusão física
 - A classificação combina conteúdo, estrutura, modalidades e recursos, mas é heurística, não um classificador semântico treinado. Use `task_type` explícito quando crítico.
 - O catálogo comprova compatibilidade técnica, não qualidade objetiva. Afinidade pela descrição é apenas um sinal; benchmarks versionados são a evolução recomendada.
 - Rate limit, cache e tracking são locais; implantação distribuída requer Redis/persistência.
-- SQLite é adequado para uma instância pequena; alta concorrência requer PostgreSQL e migrações versionadas.
+- A criação inicial do schema é automática; evoluções futuras ainda requerem migrações versionadas.
 - O custo efetivo do SSE aparece dentro do stream e ainda não é extraído pelo tracker.
 - Não há recuperação de senha, verificação de e-mail, MFA, orçamento acumulado, conversão cambial, cobrança ou painel administrativo.
 - Somente Chat Completions e `/health` são implementados.
@@ -263,7 +262,7 @@ Senhas usam Argon2id. Sessões são assinadas, `HttpOnly`, `SameSite=Strict` e, 
 
 Esse segredo possui três funções derivadas e separadas: assinatura das sessões, HMAC das chaves RouteMind e criptografia das credenciais OpenRouter. Não faça rotação direta em uma instalação com dados existentes. Sem um procedimento de migração, a troca invalida todas as chaves RouteMind e torna as credenciais OpenRouter armazenadas indecifráveis.
 
-O banco `routemind.db` e seus arquivos WAL devem ser persistidos e incluídos em backups protegidos. Mesmo com a criptografia das credenciais, o banco contém e-mails, hashes de senha e metadados de uso.
+O banco PostgreSQL deve possuir backups protegidos e uma política de retenção. Mesmo com a criptografia das credenciais, ele contém e-mails, hashes de senha e metadados de uso.
 
 ## Deploy na Vercel
 
@@ -275,6 +274,7 @@ Variáveis mínimas na Vercel:
 ROUTEMIND_ENVIRONMENT=production
 ROUTEMIND_SECURE_COOKIES=true
 ROUTEMIND_SECRET_KEY=<segredo aleatório estável com pelo menos 32 caracteres>
+ROUTEMIND_DATABASE_URL=postgresql://usuario:senha@host/database?sslmode=require
 ROUTEMIND_APP_URL=https://seu-dominio.vercel.app
 ```
 
@@ -282,13 +282,13 @@ Não copie o `.env` para o Git. Cadastre esses valores em **Project Settings →
 
 ### Banco de dados
 
-O SQLite local não deve ser usado na Vercel: Functions são executadas em ambientes efêmeros e podem ter múltiplas instâncias. O RouteMind suporta PostgreSQL por SQLAlchemy e Psycopg 3. Conecte uma integração como Neon ou Supabase e configure uma destas variáveis:
+O RouteMind usa exclusivamente PostgreSQL por SQLAlchemy e Psycopg 3. Conecte uma integração como Neon ou Supabase e configure uma destas variáveis:
 
 ```text
 ROUTEMIND_DATABASE_URL=postgresql://usuario:senha@host/database?sslmode=require
 ```
 
-Também são reconhecidas automaticamente `DATABASE_URL` e `POSTGRES_URL`, comuns em integrações da Vercel. A ordem de precedência é: `ROUTEMIND_DATABASE_URL`, `DATABASE_URL`, `POSTGRES_URL`, `ROUTEMIND_DATABASE_PATH`.
+Também são reconhecidas automaticamente `DATABASE_URL` e `POSTGRES_URL`, comuns em integrações da Vercel. A ordem de precedência é: `ROUTEMIND_DATABASE_URL`, `DATABASE_URL`, `POSTGRES_URL`. A aplicação recusa a inicialização se nenhuma delas estiver configurada ou se a URL não for PostgreSQL.
 
 Para Supabase na Vercel, prefira o **Transaction Pooler** na porta `6543`:
 
@@ -298,4 +298,4 @@ ROUTEMIND_DATABASE_URL=postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-REGION.p
 
 O RouteMind detecta conexões PostgreSQL na porta `6543`, desativa prepared statements do Psycopg e usa `NullPool`, evitando manter um segundo pool dentro de cada Function. Se `sslmode` não estiver presente, `sslmode=require` é aplicado automaticamente. Caracteres especiais da senha precisam ser codificados para URL; por exemplo, `@` deve ser escrito como `%40`.
 
-No primeiro cold start, as tabelas e índices ausentes são criados automaticamente. Para evoluções futuras de schema em produção, adote migrações versionadas com Alembic. Não use `/tmp/routemind.db`: isso faria o processo iniciar, mas contas e chaves desapareceriam ou divergiriam entre instâncias.
+No primeiro cold start, as tabelas e índices ausentes são criados automaticamente. Para evoluções futuras de schema em produção, adote migrações versionadas com Alembic.

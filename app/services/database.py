@@ -1,12 +1,10 @@
-import os
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Column, ForeignKey, Index, Integer, MetaData, String, Table, Text, create_engine, delete, event, insert, select, update
+from sqlalchemy import Column, ForeignKey, Index, Integer, MetaData, String, Table, Text, create_engine, delete, insert, select, update
 from sqlalchemy.engine import Engine, URL, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool
@@ -50,17 +48,14 @@ class User:
     openrouter_key_encrypted: str | None
 
 
-def _normalize_url(value: str) -> tuple[str, str | None]:
+def _normalize_url(value: str) -> str:
     if value.startswith("postgres://"):
-        return "postgresql+psycopg://" + value.removeprefix("postgres://"), None
+        return "postgresql+psycopg://" + value.removeprefix("postgres://")
     if value.startswith("postgresql://"):
-        return "postgresql+psycopg://" + value.removeprefix("postgresql://"), None
-    if "://" in value:
-        return value, None
-    if value == ":memory:":
-        return "sqlite+pysqlite:///:memory:", None
-    path = str(Path(value).expanduser().resolve())
-    return f"sqlite+pysqlite:///{path}", path
+        return "postgresql+psycopg://" + value.removeprefix("postgresql://")
+    if value.startswith("postgresql+psycopg://"):
+        return value
+    raise ValueError("RouteMind requires a PostgreSQL connection URL")
 
 
 def _configure_postgres_url(database_url: str) -> tuple[URL, bool]:
@@ -74,44 +69,29 @@ def _configure_postgres_url(database_url: str) -> tuple[URL, bool]:
 
 
 class Database:
-    """Synchronous repository supporting PostgreSQL in production and SQLite locally."""
+    """Synchronous PostgreSQL repository."""
 
     def __init__(self, url_or_path: str):
-        database_url, sqlite_path = _normalize_url(url_or_path)
-        self.sqlite_path = sqlite_path
+        database_url = _normalize_url(url_or_path)
         self.transaction_pooler = False
         self._connect_args: dict[str, Any] = {}
         self._lock = threading.RLock()
         engine_options: dict[str, Any] = {"pool_pre_ping": True}
-        if database_url.startswith("sqlite"):
-            self._connect_args = {"check_same_thread": False, "timeout": 10}
-            engine_target: str | URL = database_url
+        engine_target, self.transaction_pooler = _configure_postgres_url(database_url)
+        if self.transaction_pooler:
+            self._connect_args = {"prepare_threshold": None}
+            engine_options["poolclass"] = NullPool
         else:
-            engine_target, self.transaction_pooler = _configure_postgres_url(database_url)
-            if self.transaction_pooler:
-                self._connect_args = {"prepare_threshold": None}
-                engine_options["poolclass"] = NullPool
-            else:
-                engine_options.update({"pool_size": 2, "max_overflow": 1, "pool_recycle": 300})
+            engine_options.update({"pool_size": 2, "max_overflow": 1, "pool_recycle": 300})
         if self._connect_args:
             engine_options["connect_args"] = self._connect_args
         self.engine: Engine = create_engine(engine_target, **engine_options)
-        if database_url.startswith("sqlite"):
-            event.listen(self.engine, "connect", self._enable_sqlite_foreign_keys)
-
-    @staticmethod
-    def _enable_sqlite_foreign_keys(dbapi_connection: Any, _: Any) -> None:
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys = ON")
-        cursor.close()
 
     def initialize(self) -> None:
         with self._lock:
             metadata.create_all(self.engine)
             with self.engine.begin() as connection:
                 connection.execute(delete(api_keys).where(api_keys.c.revoked_at.is_not(None)))
-        if self.sqlite_path and os.path.exists(self.sqlite_path):
-            os.chmod(self.sqlite_path, 0o600)
 
     def close(self) -> None:
         self.engine.dispose()

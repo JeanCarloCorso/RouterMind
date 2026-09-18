@@ -1,5 +1,4 @@
 import asyncio
-import os
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -46,8 +45,6 @@ def create_app(openrouter_client=None, database=None) -> FastAPI:
             raise RuntimeError("ROUTEMIND_SECURE_COOKIES must be true in production")
     client = openrouter_client or OpenRouterClient(settings)
     database_connection = settings.database_connection
-    if os.getenv("VERCEL") and not database_connection.startswith(("postgres://", "postgresql://", "postgresql+")):
-        raise RuntimeError("A persistent PostgreSQL DATABASE_URL is required on Vercel; SQLite is not supported")
     database = database or Database(database_connection)
     auth = AuthService(database, secret)
 
