@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, MetaData, String, Table, Text, case, create_engine, delete, func, insert, select, text, update
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, MetaData, Numeric, String, Table, Text, case, create_engine, delete, func, insert, select, text, update
 from sqlalchemy.engine import Engine, URL, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool
@@ -47,6 +47,7 @@ request_logs = Table(
     Column("prompt_tokens", Integer),
     Column("completion_tokens", Integer),
     Column("total_tokens", Integer),
+    Column("cost_usd", Numeric(18, 10)),
     Column("response_time_ms", Integer, nullable=False),
 )
 Index("idx_request_logs_user_created", request_logs.c.user_id, request_logs.c.created_at)
@@ -113,6 +114,9 @@ class Database:
                     text("UPDATE users SET name = split_part(email, '@', 1) WHERE name IS NULL OR name = ''")
                 )
                 connection.execute(text("ALTER TABLE users ALTER COLUMN name SET NOT NULL"))
+                connection.execute(
+                    text("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(18, 10)")
+                )
                 connection.execute(delete(api_keys).where(api_keys.c.revoked_at.is_not(None)))
 
     def close(self) -> None:
@@ -204,7 +208,7 @@ class Database:
     def record_request(
         self, user_id: int, *, success: bool, status_code: int, model: str | None,
         prompt_tokens: int | None, completion_tokens: int | None,
-        total_tokens: int | None, response_time_ms: int,
+        total_tokens: int | None, cost_usd: Any, response_time_ms: int,
     ) -> None:
         with self._lock, self.engine.begin() as connection:
             connection.execute(
@@ -217,6 +221,7 @@ class Database:
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=total_tokens,
+                    cost_usd=cost_usd,
                     response_time_ms=response_time_ms,
                 )
             )
@@ -227,6 +232,7 @@ class Database:
             func.coalesce(func.sum(case((request_logs.c.success.is_(True), 1), else_=0)), 0).label("successful"),
             func.coalesce(func.sum(case((request_logs.c.success.is_(False), 1), else_=0)), 0).label("failed"),
             func.coalesce(func.sum(request_logs.c.total_tokens), 0).label("total_tokens"),
+            func.coalesce(func.sum(request_logs.c.cost_usd), 0).label("total_cost_usd"),
             func.coalesce(func.avg(request_logs.c.response_time_ms), 0).label("average_response_time_ms"),
         ).where(request_logs.c.user_id == user_id)
         with self._lock, self.engine.connect() as connection:

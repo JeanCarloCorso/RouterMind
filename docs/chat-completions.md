@@ -107,7 +107,9 @@ Em streaming, o RouteMind retransmite os bytes SSE sem reagrupar deltas.
 
 ## Métricas armazenadas
 
-Para cada requisição autenticada, o RouteMind armazena o usuário, data UTC, resultado, status HTTP, modelo, tokens de entrada/saída/total e tempo de resposta. Tokens ficam vazios quando o upstream não fornece `usage`.
+Para cada requisição autenticada, o RouteMind armazena o usuário, data UTC, resultado, status HTTP, modelo, tokens de entrada/saída/total, custo efetivo em USD e tempo de resposta. Tokens e custo ficam vazios quando o upstream não fornece esses valores em `usage`.
+
+O total apresentado no dashboard soma somente o campo `usage.cost` recebido nas respostas. O RouteMind não converte estimativas em gasto confirmado e não inventa um custo para respostas que omitem esse campo. Em streaming, o registro depende de um evento SSE que contenha `usage.cost` antes de `[DONE]`.
 
 O histórico não armazena `messages`, prompts, respostas ou argumentos de ferramentas. O dashboard apresenta os totais e as 25 chamadas mais recentes da própria conta.
 

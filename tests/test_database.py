@@ -68,5 +68,6 @@ def test_transaction_pooler_preserves_explicit_ssl_mode():
 def test_request_log_schema_contains_operational_metrics_only():
     assert set(request_logs.c.keys()) == {
         "id", "user_id", "created_at", "success", "status_code", "model",
-        "prompt_tokens", "completion_tokens", "total_tokens", "response_time_ms",
+        "prompt_tokens", "completion_tokens", "total_tokens", "cost_usd",
+        "response_time_ms",
     }

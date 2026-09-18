@@ -30,12 +30,25 @@ def usage_tokens(response_body: dict[str, Any] | None) -> dict[str, int | None]:
     }
 
 
+def usage_cost(response_body: dict[str, Any] | None) -> Decimal | None:
+    usage = (response_body or {}).get("usage") or {}
+    value = usage.get("cost")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        cost = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return cost if cost.is_finite() and cost >= 0 else None
+
+
 def persist_request(
     database: Any, user_id: int, *, status_code: int, model: str | None,
     started_at: float, response_body: dict[str, Any] | None = None,
     success: bool | None = None,
 ) -> None:
     tokens = usage_tokens(response_body)
+    cost_usd = usage_cost(response_body)
     elapsed_ms = max(0, round((time.perf_counter() - started_at) * 1000))
     try:
         database.record_request(
@@ -44,6 +57,7 @@ def persist_request(
             status_code=status_code,
             model=model,
             response_time_ms=elapsed_ms,
+            cost_usd=cost_usd,
             **tokens,
         )
     except Exception:

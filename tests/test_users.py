@@ -113,6 +113,7 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch):
         assert "free/model" in dashboard.text
         assert "Bem-sucedidas</span><strong>2" in dashboard.text
         assert "Com erro</span><strong>1" in dashboard.text
+        assert "Gasto conhecido</span><strong>US$ 0.000000" in dashboard.text
     finally:
         await client.aclose()
         get_settings.cache_clear()

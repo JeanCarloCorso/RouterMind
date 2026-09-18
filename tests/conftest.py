@@ -117,6 +117,7 @@ class MemoryDatabase:
             "successful": sum(bool(row["success"]) for row in rows),
             "failed": sum(not row["success"] for row in rows),
             "total_tokens": sum(row.get("total_tokens") or 0 for row in rows),
+            "total_cost_usd": sum((row.get("cost_usd") or 0 for row in rows), 0),
             "average_response_time_ms": sum(durations) / len(durations) if durations else 0,
         }
 
@@ -156,7 +157,7 @@ class FakeOpenRouter:
         response = httpx.Response(200, headers={"content-type": "text/event-stream"})
         async def chunks():
             yield b'data: {"id":"x","object":"chat.completion.chunk","model":"free/a"}\n\n'
-            yield b'data: {"id":"x","object":"chat.completion.chunk","model":"free/a","usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}\n\n'
+            yield b'data: {"id":"x","object":"chat.completion.chunk","model":"free/a","usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12,"cost":0.0004}}\n\n'
             yield b"data: [DONE]\n\n"
         return response, chunks()
 

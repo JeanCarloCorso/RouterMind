@@ -40,7 +40,7 @@ Depois:
 - Bearer auth, rate limiting, timeouts e logs sem prompts;
 - contas independentes com cadastro, login, sessão segura e proteção CSRF;
 - painel web para cadastrar a chave pessoal OpenRouter e administrar chaves RouteMind;
-- painel de uso com total, sucessos, erros, modelos, tokens e tempo de resposta por requisição;
+- painel de uso com total, sucessos, erros, modelos, tokens, custo efetivo em USD e tempo de resposta por requisição;
 - chaves RouteMind armazenadas somente como HMAC e chaves OpenRouter criptografadas em repouso;
 - testes com mocks, sem cobranças reais.
 
@@ -225,9 +225,10 @@ Cada chamada autenticada a `POST /api/v1/chat/completions` gera um registro asso
 - sucesso ou erro e status HTTP;
 - modelo efetivamente usado ou tentado;
 - tokens de entrada, saída e total, quando informados pelo upstream;
+- custo efetivo em USD (`usage.cost`), quando informado pelo upstream;
 - tempo total de resposta em milissegundos.
 
-O dashboard mostra os totais acumulados e as 25 requisições mais recentes. O RouteMind não armazena prompts, mensagens nem o conteúdo das respostas nesse histórico. Requisições com chave inválida não podem ser associadas a uma conta e, portanto, não entram nas estatísticas. Em streaming, tokens só aparecem quando o upstream os inclui em algum evento de uso.
+O dashboard mostra os totais acumulados, o gasto conhecido em USD e as 25 requisições mais recentes. O total financeiro soma somente `usage.cost` realmente informado pelo upstream; custos ausentes não são estimados nem tratados como cobrança confirmada. O RouteMind não armazena prompts, mensagens nem o conteúdo das respostas nesse histórico. Requisições com chave inválida não podem ser associadas a uma conta e, portanto, não entram nas estatísticas. Em streaming, tokens e custo só aparecem quando o upstream os inclui em algum evento de uso.
 
 Limites de saída muito pequenos podem ser consumidos por tokens de raciocínio e resultar em `content: null`. O RouteMind preserva o limite solicitado e não repete uma resposta HTTP `200`, pois aumentar o limite ou refazer uma geração bem-sucedida poderia quebrar compatibilidade e duplicar custo. Para respostas textuais curtas, prefira pelo menos 64 tokens; modelos de raciocínio podem exigir mais.
 
@@ -385,7 +386,7 @@ A suíte cobre cadastro, login, CSRF, criptografia, emissão e exclusão física
 - O catálogo comprova compatibilidade técnica, não qualidade objetiva. Afinidade pela descrição é apenas um sinal; benchmarks versionados são a evolução recomendada.
 - Rate limit, cache e tracking são locais; implantação distribuída requer Redis/persistência.
 - A criação inicial do schema é automática; evoluções futuras ainda requerem migrações versionadas.
-- O custo efetivo do SSE aparece dentro do stream e ainda não é extraído pelo tracker.
+- No streaming, o custo efetivo só pode ser registrado quando o upstream inclui `usage.cost` em um evento SSE antes de `[DONE]`.
 - Não há recuperação de senha, verificação de e-mail, MFA, orçamento acumulado, conversão cambial, cobrança ou painel administrativo.
 - Somente Chat Completions e `/health` são implementados.
 - Campos desconhecidos são preservados, mas só o upstream confirma suporte por modelo/provedor.

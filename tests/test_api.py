@@ -1,4 +1,5 @@
 import httpx
+from decimal import Decimal
 
 from conftest import TEST_OPENROUTER_KEY, TEST_ROUTE_KEY, model
 
@@ -115,7 +116,12 @@ async def test_request_metrics_record_success_error_model_tokens_and_time(make_c
             "id": "ok",
             "model": "free/a",
             "choices": [],
-            "usage": {"prompt_tokens": 11, "completion_tokens": 13, "total_tokens": 24},
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 13,
+                "total_tokens": 24,
+                "cost": 0.00125,
+            },
         })
     ]
     client, _ = make_client([model("free/a")], responses)
@@ -139,12 +145,14 @@ async def test_request_metrics_record_success_error_model_tokens_and_time(make_c
     assert summary["successful"] == 1
     assert summary["failed"] == 1
     assert summary["total_tokens"] == 24
+    assert summary["total_cost_usd"] == Decimal("0.00125")
     rows = database.list_request_logs(1)
     successful = next(row for row in rows if row["success"])
     assert successful["model"] == "free/a"
     assert successful["prompt_tokens"] == 11
     assert successful["completion_tokens"] == 13
     assert successful["total_tokens"] == 24
+    assert successful["cost_usd"] == Decimal("0.00125")
     assert successful["response_time_ms"] >= 0
 
 
@@ -164,3 +172,4 @@ async def test_stream_metrics_are_recorded_after_stream_finishes(make_client):
     assert row["prompt_tokens"] == 5
     assert row["completion_tokens"] == 7
     assert row["total_tokens"] == 12
+    assert row["cost_usd"] == Decimal("0.0004")
