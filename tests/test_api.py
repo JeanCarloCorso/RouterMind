@@ -1,8 +1,8 @@
 import httpx
 
-from conftest import model
+from conftest import TEST_OPENROUTER_KEY, TEST_ROUTE_KEY, model
 
-HEADERS = {"Authorization": "Bearer test-key"}
+HEADERS = {"Authorization": f"Bearer {TEST_ROUTE_KEY}"}
 
 
 async def test_free_default_and_unknown_fields_preserved(make_client):
@@ -12,6 +12,7 @@ async def test_free_default_and_unknown_fields_preserved(make_client):
     assert upstream.payloads[0]["model"] == "free/model"
     assert upstream.payloads[0]["future_parameter"] == {"x": 1}
     assert "routemind" not in upstream.payloads[0]
+    assert upstream.upstream_keys == [TEST_OPENROUTER_KEY, TEST_OPENROUTER_KEY]
 
 
 async def test_explicit_model_is_respected(make_client):
@@ -50,6 +51,47 @@ async def test_fallback_is_bounded(make_client):
     response = await client.post("/api/v1/chat/completions", headers=HEADERS, json={"messages": [{"role": "user", "content": "hello"}]})
     assert response.status_code == 200
     assert len(upstream.payloads) == 2
+
+
+async def test_restricted_free_model_falls_back_to_free_router_and_is_quarantined(make_client):
+    restricted = model("thinkingmachines/restricted:free")
+    restricted["description"] = "general assistant"
+    free_router = model("openrouter/free")
+    free_router["description"] = "random free router"
+    responses = [
+        httpx.Response(403, json={"error": {"code": 403, "message": "only available on agentic harnesses"}}),
+        httpx.Response(200, json={"id": "ok", "choices": [{"message": {"role": "assistant", "content": "OK"}}], "usage": {"cost": 0}}),
+    ]
+    client, upstream = make_client([restricted, free_router], responses)
+    body = {"messages": [{"role": "user", "content": "hello"}]}
+
+    response = await client.post("/api/v1/chat/completions", headers=HEADERS, json=body)
+    assert response.status_code == 200
+    assert [item["model"] for item in upstream.payloads] == ["thinkingmachines/restricted:free", "openrouter/free"]
+
+    second = await client.post("/api/v1/chat/completions", headers=HEADERS, json=body)
+    assert second.status_code == 200
+    assert upstream.payloads[-1]["model"] == "openrouter/free"
+
+
+async def test_explicit_model_does_not_fallback_on_403(make_client):
+    responses = [httpx.Response(403, json={"error": {"message": "forbidden"}})]
+    client, upstream = make_client([model("free/explicit"), model("openrouter/free")], responses)
+    response = await client.post(
+        "/api/v1/chat/completions",
+        headers=HEADERS,
+        json={"model": "free/explicit", "messages": [{"role": "user", "content": "hello"}]},
+    )
+    assert response.status_code == 403
+    assert len(upstream.payloads) == 1
+
+
+async def test_successful_empty_completion_is_not_retried(make_client):
+    responses = [httpx.Response(200, json={"id": "ok", "choices": [{"message": {"content": None}}], "usage": {"cost": 0}})]
+    client, upstream = make_client([model("free/a"), model("openrouter/free")], responses)
+    response = await client.post("/api/v1/chat/completions", headers=HEADERS, json={"messages": [{"role": "user", "content": "hello"}]})
+    assert response.status_code == 200
+    assert len(upstream.payloads) == 1
 
 
 async def test_streaming_preserves_sse(make_client):

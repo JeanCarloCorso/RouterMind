@@ -7,9 +7,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="ROUTEMIND_", extra="ignore")
 
-    openrouter_api_key: SecretStr = SecretStr("")
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    api_keys: str = ""
+    secret_key: SecretStr = SecretStr("development-only-change-me-at-least-32-chars")
+    database_path: str = "routemind.db"
+    environment: str = "development"
+    secure_cookies: bool = False
     catalog_ttl_seconds: int = 900
     request_timeout_seconds: float = 120.0
     default_output_tokens: int = 1024
@@ -18,11 +20,6 @@ class Settings(BaseSettings):
     max_fallback_attempts: int = 2
     app_url: str | None = None
     app_name: str = "RouteMind"
-
-    @property
-    def accepted_api_keys(self) -> set[str]:
-        return {value.strip() for value in self.api_keys.split(",") if value.strip()}
-
 
 @lru_cache
 def get_settings() -> Settings:

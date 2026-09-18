@@ -13,7 +13,7 @@ from app.services.task_classifier import classify
 from app.services.usage_tracker import record_usage
 
 router = APIRouter()
-RETRYABLE_UNBILLED_STATUSES = {404, 429, 502, 503}
+RETRYABLE_PREGENERATION_STATUSES = {403, 404, 429, 502, 503}
 
 
 def _validate_payload(body: Any) -> tuple[dict[str, Any], RoutingOptions]:
@@ -46,6 +46,16 @@ def _upstream_response(response: Any) -> Response:
     )
 
 
+def _attempts(candidates: list[Candidate], payload: dict[str, Any], options: RoutingOptions, limit: int) -> list[Candidate]:
+    selected = candidates[:limit]
+    if payload.get("model") or not options.free_only or not options.fallback_enabled or limit < 2:
+        return selected
+    free_router = next((candidate for candidate in candidates if candidate.model["id"] == "openrouter/free"), None)
+    if free_router and free_router not in selected:
+        selected = [candidates[0], free_router]
+    return selected
+
+
 @router.post("/api/v1/chat/completions")
 async def chat_completions(request: Request) -> Response:
     try:
@@ -54,10 +64,10 @@ async def chat_completions(request: Request) -> Response:
         raise RouteMindError(400, "Request body must be valid JSON", "invalid_request") from exc
     payload, options = _validate_payload(body)
     requirements = classify(payload, options.task_type)
-    models = await request.app.state.catalog.get_models()
+    models = await request.app.state.catalog.get_models(request.state.user.id, request.state.openrouter_key)
     candidates = rank_models(models, payload, options, requirements, request.app.state.settings.default_output_tokens)
     attempt_limit = request.app.state.settings.max_fallback_attempts if options.fallback_enabled else 1
-    attempts = candidates[:attempt_limit]
+    attempts = _attempts(candidates, payload, options, attempt_limit)
     if payload.get("stream") is True:
         return await _stream_completion(request, payload, attempts)
 
@@ -65,13 +75,13 @@ async def chat_completions(request: Request) -> Response:
     for candidate in attempts:
         upstream_payload = {**payload, "model": candidate.model["id"]}
         try:
-            response = await request.app.state.openrouter.complete(upstream_payload)
+            response = await request.app.state.openrouter.complete(upstream_payload, request.state.openrouter_key)
         except httpx.TimeoutException as exc:
             raise RouteMindError(504, "OpenRouter request timed out", "upstream_timeout") from exc
         except httpx.HTTPError as exc:
             raise RouteMindError(502, "Could not reach OpenRouter", "upstream_error") from exc
         last_response = response
-        if response.status_code not in RETRYABLE_UNBILLED_STATUSES:
+        if response.status_code not in RETRYABLE_PREGENERATION_STATUSES:
             if response.is_success:
                 try:
                     response_json = response.json()
@@ -79,6 +89,8 @@ async def chat_completions(request: Request) -> Response:
                     response_json = None
                 record_usage(candidate.model["id"], candidate.estimate.usd, response_json)
             return _upstream_response(response)
+        if response.status_code == 403 and not payload.get("model"):
+            request.app.state.catalog.mark_temporarily_unavailable(candidate.model["id"])
     assert last_response is not None
     return _upstream_response(last_response)
 
@@ -88,13 +100,15 @@ async def _stream_completion(request: Request, payload: dict[str, Any], attempts
     for candidate in attempts:
         upstream_payload = {**payload, "model": candidate.model["id"]}
         try:
-            response, iterator = await request.app.state.openrouter.stream(upstream_payload)
+            response, iterator = await request.app.state.openrouter.stream(upstream_payload, request.state.openrouter_key)
         except httpx.TimeoutException as exc:
             raise RouteMindError(504, "OpenRouter request timed out", "upstream_timeout") from exc
         except httpx.HTTPError as exc:
             raise RouteMindError(502, "Could not reach OpenRouter", "upstream_error") from exc
         last_response = response
-        if response.status_code in RETRYABLE_UNBILLED_STATUSES:
+        if response.status_code in RETRYABLE_PREGENERATION_STATUSES:
+            if response.status_code == 403 and not payload.get("model"):
+                request.app.state.catalog.mark_temporarily_unavailable(candidate.model["id"])
             await response.aclose()
             continue
         if not response.is_success:
