@@ -105,6 +105,12 @@ Uma resposta bem-sucedida não é reconstruída pelo RouteMind. O status, corpo 
 
 Em streaming, o RouteMind retransmite os bytes SSE sem reagrupar deltas.
 
+## Métricas armazenadas
+
+Para cada requisição autenticada, o RouteMind armazena o usuário, data UTC, resultado, status HTTP, modelo, tokens de entrada/saída/total e tempo de resposta. Tokens ficam vazios quando o upstream não fornece `usage`.
+
+O histórico não armazena `messages`, prompts, respostas ou argumentos de ferramentas. O dashboard apresenta os totais e as 25 chamadas mais recentes da própria conta.
+
 ## Erros produzidos localmente
 
 Erros internos usam este envelope:

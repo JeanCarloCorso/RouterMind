@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Column, ForeignKey, Index, Integer, MetaData, String, Table, Text, create_engine, delete, insert, select, text, update
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, MetaData, String, Table, Text, case, create_engine, delete, func, insert, select, text, update
 from sqlalchemy.engine import Engine, URL, make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool
@@ -35,6 +35,21 @@ api_keys = Table(
     Column("revoked_at", String(40)),
 )
 Index("idx_api_keys_hash", api_keys.c.key_hash)
+request_logs = Table(
+    "request_logs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("created_at", String(40), nullable=False),
+    Column("success", Boolean, nullable=False),
+    Column("status_code", Integer, nullable=False),
+    Column("model", String(255)),
+    Column("prompt_tokens", Integer),
+    Column("completion_tokens", Integer),
+    Column("total_tokens", Integer),
+    Column("response_time_ms", Integer, nullable=False),
+)
+Index("idx_request_logs_user_created", request_logs.c.user_id, request_logs.c.created_at)
 
 
 class DuplicateUserError(Exception):
@@ -185,3 +200,44 @@ class Database:
                     update(api_keys).where(api_keys.c.key_hash == key_hash).values(last_used_at=datetime.now(UTC).isoformat())
                 )
         return self._user(row)
+
+    def record_request(
+        self, user_id: int, *, success: bool, status_code: int, model: str | None,
+        prompt_tokens: int | None, completion_tokens: int | None,
+        total_tokens: int | None, response_time_ms: int,
+    ) -> None:
+        with self._lock, self.engine.begin() as connection:
+            connection.execute(
+                insert(request_logs).values(
+                    user_id=user_id,
+                    created_at=datetime.now(UTC).isoformat(),
+                    success=success,
+                    status_code=status_code,
+                    model=model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    response_time_ms=response_time_ms,
+                )
+            )
+
+    def request_summary(self, user_id: int) -> Mapping[str, Any]:
+        statement = select(
+            func.count(request_logs.c.id).label("total"),
+            func.coalesce(func.sum(case((request_logs.c.success.is_(True), 1), else_=0)), 0).label("successful"),
+            func.coalesce(func.sum(case((request_logs.c.success.is_(False), 1), else_=0)), 0).label("failed"),
+            func.coalesce(func.sum(request_logs.c.total_tokens), 0).label("total_tokens"),
+            func.coalesce(func.avg(request_logs.c.response_time_ms), 0).label("average_response_time_ms"),
+        ).where(request_logs.c.user_id == user_id)
+        with self._lock, self.engine.connect() as connection:
+            return connection.execute(statement).mappings().one()
+
+    def list_request_logs(self, user_id: int, limit: int = 50) -> list[Mapping[str, Any]]:
+        statement = (
+            select(request_logs)
+            .where(request_logs.c.user_id == user_id)
+            .order_by(request_logs.c.id.desc())
+            .limit(limit)
+        )
+        with self._lock, self.engine.connect() as connection:
+            return list(connection.execute(statement).mappings().all())

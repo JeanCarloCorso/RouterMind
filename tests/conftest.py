@@ -26,6 +26,7 @@ class MemoryDatabase:
     def __init__(self):
         self.users: dict[int, User] = {}
         self.keys: dict[int, dict[str, Any]] = {}
+        self.requests: list[dict[str, Any]] = []
         self._next_user_id = 1
         self._next_key_id = 1
 
@@ -100,6 +101,29 @@ class MemoryDatabase:
         key["last_used_at"] = datetime.now(UTC).isoformat()
         return self.users.get(key["user_id"])
 
+    def record_request(self, user_id: int, **values) -> None:
+        self.requests.append({
+            "id": len(self.requests) + 1,
+            "user_id": user_id,
+            "created_at": datetime.now(UTC).isoformat(),
+            **values,
+        })
+
+    def request_summary(self, user_id: int):
+        rows = [row for row in self.requests if row["user_id"] == user_id]
+        durations = [row["response_time_ms"] for row in rows]
+        return {
+            "total": len(rows),
+            "successful": sum(bool(row["success"]) for row in rows),
+            "failed": sum(not row["success"] for row in rows),
+            "total_tokens": sum(row.get("total_tokens") or 0 for row in rows),
+            "average_response_time_ms": sum(durations) / len(durations) if durations else 0,
+        }
+
+    def list_request_logs(self, user_id: int, limit: int = 50):
+        rows = [row.copy() for row in self.requests if row["user_id"] == user_id]
+        return list(reversed(rows))[:limit]
+
 
 def model(model_id: str, prompt: str = "0", completion: str = "0", supported=None, inputs=None) -> dict[str, Any]:
     return {
@@ -131,7 +155,8 @@ class FakeOpenRouter:
         self.upstream_keys.append(api_key)
         response = httpx.Response(200, headers={"content-type": "text/event-stream"})
         async def chunks():
-            yield b'data: {"id":"x","object":"chat.completion.chunk"}\n\n'
+            yield b'data: {"id":"x","object":"chat.completion.chunk","model":"free/a"}\n\n'
+            yield b'data: {"id":"x","object":"chat.completion.chunk","model":"free/a","usage":{"prompt_tokens":5,"completion_tokens":7,"total_tokens":12}}\n\n'
             yield b"data: [DONE]\n\n"
         return response, chunks()
 
@@ -155,6 +180,7 @@ async def make_client(monkeypatch):
         database.set_openrouter_key(user.id, auth.encrypt_openrouter_key(TEST_OPENROUTER_KEY))
         database.create_api_key(user.id, "Test", TEST_ROUTE_KEY[:16], auth._api_hash(TEST_ROUTE_KEY))
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(fake, database)), base_url="http://test")
+        client.routemind_database = database
         clients.append(client)
         return client, fake
     yield factory

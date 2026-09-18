@@ -14,6 +14,7 @@ from app.services.model_catalog import ModelCatalog
 from app.services.openrouter_client import OpenRouterClient
 from app.services.auth import AuthService
 from app.services.database import Database
+from app.services.usage_tracker import persist_request
 from app.web import router as web_router
 
 
@@ -75,6 +76,9 @@ def create_app(openrouter_client=None, database=None) -> FastAPI:
 
     @app.middleware("http")
     async def authentication_and_rate_limit(request: Request, call_next):
+        track_request = request.url.path == "/api/v1/chat/completions"
+        if track_request:
+            request.state.request_started = time.perf_counter()
         if request.url.path == "/health":
             return await call_next(request)
         identity = request.client.host if request.client else "unknown"
@@ -84,15 +88,40 @@ def create_app(openrouter_client=None, database=None) -> FastAPI:
             user = auth.authenticate_api_key(token)
             if not user:
                 return JSONResponse(status_code=401, content={"error": {"message": "Invalid RouteMind API key", "code": "invalid_api_key"}})
+            request.state.user = user
             openrouter_key = auth.decrypt_openrouter_key(user)
             if not openrouter_key:
+                if track_request:
+                    persist_request(database, user.id, status_code=403, model=None, started_at=request.state.request_started)
                 return JSONResponse(status_code=403, content={"error": {"message": "No valid OpenRouter key is configured for this account", "code": "openrouter_key_missing"}})
-            request.state.user = user
             request.state.openrouter_key = openrouter_key
             identity = f"user:{user.id}"
         if not await limiter.allow(identity):
+            if track_request and hasattr(request.state, "user"):
+                persist_request(database, request.state.user.id, status_code=429, model=None, started_at=request.state.request_started)
             return JSONResponse(status_code=429, content={"error": {"message": "Rate limit exceeded", "code": "rate_limit_exceeded"}})
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            if track_request and hasattr(request.state, "user"):
+                persist_request(
+                    database,
+                    request.state.user.id,
+                    status_code=500,
+                    model=getattr(request.state, "selected_model", None),
+                    started_at=request.state.request_started,
+                    success=False,
+                )
+            raise
+        if track_request and hasattr(request.state, "user") and not getattr(request.state, "defer_request_log", False):
+            persist_request(
+                database,
+                request.state.user.id,
+                status_code=response.status_code,
+                model=getattr(request.state, "selected_model", None),
+                started_at=request.state.request_started,
+                response_body=getattr(request.state, "usage_response_body", None),
+            )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"

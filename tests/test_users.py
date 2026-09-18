@@ -108,6 +108,11 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch):
         )
         assert completion.status_code == 200
         assert upstream.upstream_keys[-2:] == ["sk-or-v1-alice-replacement-key"] * 2
+        dashboard = await client.get("/dashboard")
+        assert "Histórico de requisições" in dashboard.text
+        assert "free/model" in dashboard.text
+        assert "Bem-sucedidas</span><strong>2" in dashboard.text
+        assert "Com erro</span><strong>1" in dashboard.text
     finally:
         await client.aclose()
         get_settings.cache_clear()

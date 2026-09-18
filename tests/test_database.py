@@ -1,7 +1,7 @@
 import pytest
 
 from app.core.config import get_settings
-from app.services.database import Database
+from app.services.database import Database, request_logs
 from sqlalchemy.pool import NullPool
 
 
@@ -63,3 +63,10 @@ def test_transaction_pooler_preserves_explicit_ssl_mode():
         assert database.engine.url.query["sslmode"] == "verify-full"
     finally:
         database.close()
+
+
+def test_request_log_schema_contains_operational_metrics_only():
+    assert set(request_logs.c.keys()) == {
+        "id", "user_id", "created_at", "success", "status_code", "model",
+        "prompt_tokens", "completion_tokens", "total_tokens", "response_time_ms",
+    }

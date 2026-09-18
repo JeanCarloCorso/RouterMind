@@ -107,3 +107,60 @@ async def test_auth_and_validation(make_client):
     client, _ = make_client([model("free/a")])
     assert (await client.post("/api/v1/chat/completions", json={"messages": []})).status_code == 401
     assert (await client.post("/api/v1/chat/completions", headers=HEADERS, json={"messages": []})).status_code == 400
+
+
+async def test_request_metrics_record_success_error_model_tokens_and_time(make_client):
+    responses = [
+        httpx.Response(200, json={
+            "id": "ok",
+            "model": "free/a",
+            "choices": [],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 13, "total_tokens": 24},
+        })
+    ]
+    client, _ = make_client([model("free/a")], responses)
+
+    success = await client.post(
+        "/api/v1/chat/completions",
+        headers=HEADERS,
+        json={"messages": [{"role": "user", "content": "hello"}]},
+    )
+    error = await client.post(
+        "/api/v1/chat/completions",
+        headers=HEADERS,
+        json={"messages": []},
+    )
+
+    assert success.status_code == 200
+    assert error.status_code == 400
+    database = client.routemind_database
+    summary = database.request_summary(1)
+    assert summary["total"] == 2
+    assert summary["successful"] == 1
+    assert summary["failed"] == 1
+    assert summary["total_tokens"] == 24
+    rows = database.list_request_logs(1)
+    successful = next(row for row in rows if row["success"])
+    assert successful["model"] == "free/a"
+    assert successful["prompt_tokens"] == 11
+    assert successful["completion_tokens"] == 13
+    assert successful["total_tokens"] == 24
+    assert successful["response_time_ms"] >= 0
+
+
+async def test_stream_metrics_are_recorded_after_stream_finishes(make_client):
+    client, _ = make_client([model("free/a")])
+    async with client.stream(
+        "POST",
+        "/api/v1/chat/completions",
+        headers=HEADERS,
+        json={"messages": [{"role": "user", "content": "hello"}], "stream": True},
+    ) as response:
+        _ = b"".join([chunk async for chunk in response.aiter_bytes()])
+
+    row = client.routemind_database.list_request_logs(1)[0]
+    assert row["success"] is True
+    assert row["model"] == "free/a"
+    assert row["prompt_tokens"] == 5
+    assert row["completion_tokens"] == 7
+    assert row["total_tokens"] == 12

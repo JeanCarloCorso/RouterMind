@@ -40,6 +40,7 @@ Depois:
 - Bearer auth, rate limiting, timeouts e logs sem prompts;
 - contas independentes com cadastro, login, sessão segura e proteção CSRF;
 - painel web para cadastrar a chave pessoal OpenRouter e administrar chaves RouteMind;
+- painel de uso com total, sucessos, erros, modelos, tokens e tempo de resposta por requisição;
 - chaves RouteMind armazenadas somente como HMAC e chaves OpenRouter criptografadas em repouso;
 - testes com mocks, sem cobranças reais.
 
@@ -215,6 +216,18 @@ Os valores do catálogo são preços por token. A saída usa `max_completion_tok
 Um modelo só é gratuito quando os componentes relevantes (`prompt`, `completion`, `request`, `image`, `audio`) são válidos e zero. Preço ausente/inválido torna o modelo inelegível. Requisições com `plugins` são recusadas pelo preflight, pois ferramentas de servidor podem ter cobrança independente não representada no preço base.
 
 A estimativa reduz risco, mas não é garantia contábil: tokenização, cache, reasoning, mídia e preço do provedor afetam o custo real. O gateway registra a estimativa e `usage.cost` quando devolvido.
+
+## Histórico de uso
+
+Cada chamada autenticada a `POST /api/v1/chat/completions` gera um registro associado ao usuário com:
+
+- data e hora em UTC;
+- sucesso ou erro e status HTTP;
+- modelo efetivamente usado ou tentado;
+- tokens de entrada, saída e total, quando informados pelo upstream;
+- tempo total de resposta em milissegundos.
+
+O dashboard mostra os totais acumulados e as 25 requisições mais recentes. O RouteMind não armazena prompts, mensagens nem o conteúdo das respostas nesse histórico. Requisições com chave inválida não podem ser associadas a uma conta e, portanto, não entram nas estatísticas. Em streaming, tokens só aparecem quando o upstream os inclui em algum evento de uso.
 
 Limites de saída muito pequenos podem ser consumidos por tokens de raciocínio e resultar em `content: null`. O RouteMind preserva o limite solicitado e não repete uma resposta HTTP `200`, pois aumentar o limite ou refazer uma geração bem-sucedida poderia quebrar compatibilidade e duplicar custo. Para respostas textuais curtas, prefira pelo menos 64 tokens; modelos de raciocínio podem exigir mais.
 
