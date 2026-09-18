@@ -49,6 +49,9 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
                 """
             )
+            # Version 0.2 changes revocation into physical deletion. Purge legacy rows
+            # so hashes and metadata from previously revoked keys are not retained.
+            connection.execute("DELETE FROM api_keys WHERE revoked_at IS NOT NULL")
         if self.path != ":memory:" and os.path.exists(self.path):
             os.chmod(self.path, 0o600)
 
@@ -78,6 +81,14 @@ class Database:
         with self._lock, self._connect() as connection:
             connection.execute("UPDATE users SET openrouter_key_encrypted = ? WHERE id = ?", (encrypted_key, user_id))
 
+    def delete_openrouter_key(self, user_id: int) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET openrouter_key_encrypted = NULL WHERE id = ? AND openrouter_key_encrypted IS NOT NULL",
+                (user_id,),
+            )
+            return cursor.rowcount == 1
+
     def create_api_key(self, user_id: int, label: str, prefix: str, key_hash: str) -> int:
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
@@ -93,12 +104,16 @@ class Database:
                 (user_id,),
             ).fetchall()
 
-    def revoke_api_key(self, user_id: int, key_id: int) -> bool:
+    def get_api_key(self, user_id: int, key_id: int) -> sqlite3.Row | None:
         with self._lock, self._connect() as connection:
-            cursor = connection.execute(
-                "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL",
-                (datetime.now(UTC).isoformat(), key_id, user_id),
-            )
+            return connection.execute(
+                "SELECT id, label, key_prefix, created_at, last_used_at FROM api_keys WHERE id = ? AND user_id = ?",
+                (key_id, user_id),
+            ).fetchone()
+
+    def delete_api_key(self, user_id: int, key_id: int) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM api_keys WHERE id = ? AND user_id = ?", (key_id, user_id))
             return cursor.rowcount == 1
 
     def find_user_by_api_hash(self, key_hash: str) -> User | None:

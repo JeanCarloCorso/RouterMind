@@ -163,9 +163,11 @@ Depois de iniciar, abra `http://localhost:8000/register`, crie a conta, cadastre
 | `POST` | `/register` | CSRF | criação da conta |
 | `GET/POST` | `/login` | pública/CSRF | início de sessão |
 | `GET` | `/dashboard` | sessão | credenciais e chaves do usuário |
-| `POST` | `/openrouter-key` | sessão + CSRF | cadastrar ou substituir a chave OpenRouter |
+| `POST` | `/openrouter-key` | sessão + CSRF | cadastrar a chave OpenRouter quando nenhuma está configurada |
+| `POST` | `/openrouter-key/delete` | sessão + CSRF + confirmação | excluir a chave OpenRouter atual |
 | `POST` | `/keys` | sessão + CSRF | gerar uma chave RouteMind |
-| `POST` | `/keys/{id}/revoke` | sessão + CSRF | revogar uma chave RouteMind |
+| `GET` | `/keys/{id}/delete` | sessão | exibir a confirmação de exclusão |
+| `POST` | `/keys/{id}/delete` | sessão + CSRF | excluir permanentemente a chave RouteMind e seus metadados |
 | `POST` | `/logout` | sessão + CSRF | encerrar a sessão |
 | `POST` | `/api/v1/chat/completions` | Bearer `rm_live_...` | proxy inteligente da OpenRouter |
 | `GET` | `/health` | pública | verificação de saúde |
@@ -239,7 +241,7 @@ response = client.chat.completions.create(
 
 Os testes usam mocks. Uma validação real pode usar uma chave e modelo gratuito, mas deve ser opt-in porque catálogo, disponibilidade e rate limits mudam.
 
-A suíte cobre cadastro, login, CSRF, criptografia, emissão e revogação de chaves, isolamento entre usuários, ausência de chave OpenRouter, seleção de modelos, custos, fallback e streaming SSE.
+A suíte cobre cadastro, login, CSRF, criptografia, emissão e exclusão física de chaves, isolamento entre usuários, ausência de chave OpenRouter, seleção de modelos, custos, fallback e streaming SSE.
 
 ## Limitações conhecidas
 

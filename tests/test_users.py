@@ -1,4 +1,5 @@
 import re
+import sqlite3
 
 import httpx
 
@@ -36,6 +37,9 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch, tmp_path):
         )
         assert response.status_code == 200
         assert "Não configurada" in response.text
+        assert "dashboard-grid" in response.text
+        assert "Salvar chave" in response.text
+        assert "Excluir chave OpenRouter" not in response.text
 
         csrf = csrf_from(response)
         response = await client.post(
@@ -44,6 +48,8 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch, tmp_path):
             follow_redirects=True,
         )
         assert "Configurada" in response.text
+        assert "Excluir chave OpenRouter" in response.text
+        assert "id='or-key'" not in response.text
         csrf = csrf_from(response)
         response = await client.post("/keys", data={"csrf": csrf, "label": "Produção"})
         match = re.search(r"rm_live_[A-Za-z0-9_-]+", response.text)
@@ -58,12 +64,55 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch, tmp_path):
         assert completion.status_code == 200
         assert upstream.upstream_keys == ["sk-or-v1-alice-personal-key"] * 2
         assert route_key not in upstream.upstream_keys
+
+        overwrite = await client.post(
+            "/openrouter-key",
+            data={"csrf": csrf_from(response), "openrouter_key": "sk-or-v1-should-not-overwrite"},
+        )
+        assert overwrite.status_code == 409
+        stored_user = database.get_user(1)
+        auth = AuthService(database, "integration-secret-at-least-32-characters")
+        assert stored_user and auth.decrypt_openrouter_key(stored_user) == "sk-or-v1-alice-personal-key"
+
+        missing_confirmation = await client.post(
+            "/openrouter-key/delete",
+            data={"csrf": csrf_from(overwrite)},
+        )
+        assert missing_confirmation.status_code == 400
+        deleted = await client.post(
+            "/openrouter-key/delete",
+            data={"csrf": csrf_from(missing_confirmation), "confirm": "yes"},
+            follow_redirects=True,
+        )
+        assert "Não configurada" in deleted.text
+        assert database.get_user(1).openrouter_key_encrypted is None  # type: ignore[union-attr]
+
+        unavailable = await client.post(
+            "/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {route_key}"},
+            json={"messages": [{"role": "user", "content": "Olá"}]},
+        )
+        assert unavailable.status_code == 403
+
+        replaced = await client.post(
+            "/openrouter-key",
+            data={"csrf": csrf_from(deleted), "openrouter_key": "sk-or-v1-alice-replacement-key"},
+            follow_redirects=True,
+        )
+        assert "Configurada" in replaced.text
+        completion = await client.post(
+            "/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {route_key}"},
+            json={"messages": [{"role": "user", "content": "Olá novamente"}]},
+        )
+        assert completion.status_code == 200
+        assert upstream.upstream_keys[-2:] == ["sk-or-v1-alice-replacement-key"] * 2
     finally:
         await client.aclose()
         get_settings.cache_clear()
 
 
-async def test_csrf_and_revoked_key_are_enforced(monkeypatch, tmp_path):
+async def test_csrf_confirmation_and_physical_key_deletion(monkeypatch, tmp_path):
     monkeypatch.setenv("ROUTEMIND_SECRET_KEY", "integration-secret-at-least-32-characters")
     monkeypatch.setenv("ROUTEMIND_ENVIRONMENT", "development")
     monkeypatch.setenv("ROUTEMIND_SECURE_COOKIES", "false")
@@ -86,8 +135,25 @@ async def test_csrf_and_revoked_key_are_enforced(monkeypatch, tmp_path):
         response = await client.post("/keys", data={"csrf": csrf, "label": "Temporária"})
         route_key = re.search(r"rm_live_[A-Za-z0-9_-]+", response.text).group(0)  # type: ignore[union-attr]
         key_id = database.list_api_keys(1)[0]["id"]
-        csrf = csrf_from(response)
-        await client.post(f"/keys/{key_id}/revoke", data={"csrf": csrf})
+        confirmation = await client.get(f"/keys/{key_id}/delete")
+        assert confirmation.status_code == 200
+        assert "Confirmar exclusão permanente" in confirmation.text
+        assert "Esta ação é permanente" in confirmation.text
+        assert len(database.list_api_keys(1)) == 1
+
+        invalid_csrf = await client.post(f"/keys/{key_id}/delete", data={"csrf": "invalid"})
+        assert invalid_csrf.status_code == 403
+        assert len(database.list_api_keys(1)) == 1
+
+        deleted = await client.post(
+            f"/keys/{key_id}/delete",
+            data={"csrf": csrf_from(confirmation)},
+            follow_redirects=True,
+        )
+        assert deleted.status_code == 200
+        assert "Nenhuma chave criada" in deleted.text
+        assert database.list_api_keys(1) == []
+        assert database.get_api_key(1, key_id) is None
         denied = await client.post(
             "/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {route_key}"},
@@ -115,6 +181,19 @@ def test_api_keys_are_isolated_per_user(tmp_path):
     assert resolved_alice and auth.decrypt_openrouter_key(resolved_alice) == "sk-or-v1-alice-key"
     assert resolved_bob and auth.decrypt_openrouter_key(resolved_bob) == "sk-or-v1-bob-key"
     assert auth.authenticate_api_key("rm_live_unknown_but_long_enough_to_validate") is None
+
+
+def test_legacy_revoked_keys_are_purged_on_initialization(tmp_path):
+    path = str(tmp_path / "legacy.db")
+    database = Database(path)
+    database.initialize()
+    auth = AuthService(database, "legacy-secret-with-at-least-32-characters")
+    user = auth.register("legacy@example.com", "legacy-secure-password")
+    auth.issue_api_key(user.id, "Antiga")
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE api_keys SET revoked_at = '2026-01-01T00:00:00Z'")
+    database.initialize()
+    assert database.list_api_keys(user.id) == []
 
 
 async def test_api_rejects_account_without_openrouter_key(monkeypatch, tmp_path):
