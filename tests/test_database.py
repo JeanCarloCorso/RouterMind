@@ -2,6 +2,8 @@ import pytest
 
 from app.core.config import get_settings
 from app.services.database import Database, request_logs
+from sqlalchemy import func, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.pool import NullPool
 
 
@@ -69,5 +71,20 @@ def test_request_log_schema_contains_operational_metrics_only():
     assert set(request_logs.c.keys()) == {
         "id", "user_id", "created_at", "success", "status_code", "model",
         "prompt_tokens", "completion_tokens", "total_tokens", "cost_usd",
-        "response_time_ms",
+        "response_time_ms", "api_key_id",
     }
+
+
+def test_daily_chart_expression_reuses_postgres_bind_parameters():
+    day = func.substr(request_logs.c.created_at, 1, 10)
+    statement = (
+        select(day.label("label"), func.count(request_logs.c.id))
+        .group_by(day)
+        .order_by(day.desc())
+    )
+    compiled = statement.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+
+    assert sql.count("%(substr_1)s") == 3
+    assert sql.count("%(substr_2)s") == 3
+    assert "substr_3" not in sql

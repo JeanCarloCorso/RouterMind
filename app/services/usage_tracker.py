@@ -45,6 +45,7 @@ def usage_cost(response_body: dict[str, Any] | None) -> Decimal | None:
 def persist_request(
     database: Any, user_id: int, *, status_code: int, model: str | None,
     started_at: float, response_body: dict[str, Any] | None = None,
+    api_key_id: int | None = None,
     success: bool | None = None,
 ) -> None:
     tokens = usage_tokens(response_body)
@@ -53,6 +54,7 @@ def persist_request(
     try:
         database.record_request(
             user_id,
+            api_key_id=api_key_id,
             success=(200 <= status_code < 400) if success is None else success,
             status_code=status_code,
             model=model,

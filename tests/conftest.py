@@ -61,7 +61,7 @@ class MemoryDatabase:
         self.users[user_id] = User(user.id, user.name, user.email, user.password_hash, None)
         return True
 
-    def create_api_key(self, user_id: int, label: str, prefix: str, key_hash: str) -> int:
+    def create_api_key(self, user_id: int, label: str, prefix: str, key_hash: str, expires_at=None) -> int:
         key_id = self._next_key_id
         self._next_key_id += 1
         self.keys[key_id] = {
@@ -73,6 +73,7 @@ class MemoryDatabase:
             "created_at": datetime.now(UTC).isoformat(),
             "last_used_at": None,
             "revoked_at": None,
+            "expires_at": expires_at,
         }
         return key_id
 
@@ -89,17 +90,23 @@ class MemoryDatabase:
 
     def delete_api_key(self, user_id: int, key_id: int) -> bool:
         key = self.keys.get(key_id)
-        if not key or key["user_id"] != user_id:
+        if not key or key["user_id"] != user_id or key["revoked_at"]:
             return False
-        del self.keys[key_id]
+        key["revoked_at"] = datetime.now(UTC).isoformat()
         return True
 
-    def find_user_by_api_hash(self, key_hash: str) -> User | None:
+    def find_api_key_identity(self, key_hash: str):
         key = next((key for key in self.keys.values() if key["key_hash"] == key_hash), None)
-        if not key:
+        now = datetime.now(UTC).isoformat()
+        if not key or key["revoked_at"] or (key["expires_at"] and key["expires_at"] <= now):
             return None
         key["last_used_at"] = datetime.now(UTC).isoformat()
-        return self.users.get(key["user_id"])
+        user = self.users.get(key["user_id"])
+        return (user, key["id"]) if user else None
+
+    def find_user_by_api_hash(self, key_hash: str) -> User | None:
+        identity = self.find_api_key_identity(key_hash)
+        return identity[0] if identity else None
 
     def record_request(self, user_id: int, **values) -> None:
         self.requests.append({
@@ -123,7 +130,27 @@ class MemoryDatabase:
 
     def list_request_logs(self, user_id: int, limit: int = 50):
         rows = [row.copy() for row in self.requests if row["user_id"] == user_id]
+        for row in rows:
+            key = self.keys.get(row.get("api_key_id"))
+            row["api_key_label"] = key["label"] if key else None
+            row["api_key_prefix"] = key["key_prefix"] if key else None
         return list(reversed(rows))[:limit]
+
+    def dashboard_charts(self, user_id: int):
+        days = {}
+        for row in self.requests:
+            if row["user_id"] != user_id:
+                continue
+            day = row["created_at"][:10]
+            item = days.setdefault(day, {"label": day, "requests": 0, "tokens": 0})
+            item["requests"] += 1
+            item["tokens"] += row.get("total_tokens") or 0
+        keys = []
+        for key in self.list_api_keys(user_id):
+            matching = [row for row in self.requests if row.get("api_key_id") == key["id"]]
+            keys.append({"label": key["label"], "requests": len(matching),
+                         "tokens": sum(row.get("total_tokens") or 0 for row in matching)})
+        return {"by_day": list(days.values())[-14:], "by_key": keys}
 
 
 def model(model_id: str, prompt: str = "0", completion: str = "0", supported=None, inputs=None) -> dict[str, Any]:

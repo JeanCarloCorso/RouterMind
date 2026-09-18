@@ -157,6 +157,7 @@ async def _stream_completion(request: Request, payload: dict[str, Any], attempts
                 persist_request(
                     request.app.state.database,
                     request.state.user.id,
+                    api_key_id=request.state.api_key_id,
                     status_code=response.status_code if completed else 499,
                     model=getattr(request.state, "selected_model", candidate.model["id"]),
                     started_at=request.state.request_started,

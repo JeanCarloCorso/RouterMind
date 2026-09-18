@@ -31,8 +31,8 @@ api_keys = Table(
     Column("key_hash", String(64), nullable=False, unique=True),
     Column("created_at", String(40), nullable=False),
     Column("last_used_at", String(40)),
-    # Kept only for automatic cleanup of databases created before physical deletion.
     Column("revoked_at", String(40)),
+    Column("expires_at", String(40)),
 )
 Index("idx_api_keys_hash", api_keys.c.key_hash)
 request_logs = Table(
@@ -40,6 +40,7 @@ request_logs = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("api_key_id", Integer, ForeignKey("api_keys.id", ondelete="SET NULL")),
     Column("created_at", String(40), nullable=False),
     Column("success", Boolean, nullable=False),
     Column("status_code", Integer, nullable=False),
@@ -51,6 +52,7 @@ request_logs = Table(
     Column("response_time_ms", Integer, nullable=False),
 )
 Index("idx_request_logs_user_created", request_logs.c.user_id, request_logs.c.created_at)
+Index("idx_request_logs_api_key", request_logs.c.api_key_id)
 
 
 class DuplicateUserError(Exception):
@@ -117,7 +119,16 @@ class Database:
                 connection.execute(
                     text("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(18, 10)")
                 )
-                connection.execute(delete(api_keys).where(api_keys.c.revoked_at.is_not(None)))
+                connection.execute(text("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at VARCHAR(40)"))
+                connection.execute(text("ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS api_key_id INTEGER"))
+                connection.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_request_logs_api_key ON request_logs (api_key_id)"
+                ))
+                connection.execute(text(
+                    "DO $$ BEGIN ALTER TABLE request_logs ADD CONSTRAINT request_logs_api_key_id_fkey "
+                    "FOREIGN KEY (api_key_id) REFERENCES api_keys(id) ON DELETE SET NULL; "
+                    "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
+                ))
 
     def close(self) -> None:
         self.engine.dispose()
@@ -160,19 +171,21 @@ class Database:
             )
             return result.rowcount == 1
 
-    def create_api_key(self, user_id: int, label: str, prefix: str, key_hash: str) -> int:
+    def create_api_key(self, user_id: int, label: str, prefix: str, key_hash: str, expires_at: str | None = None) -> int:
         with self._lock, self.engine.begin() as connection:
             return int(
                 connection.execute(
                     insert(api_keys)
-                    .values(user_id=user_id, label=label, key_prefix=prefix, key_hash=key_hash, created_at=datetime.now(UTC).isoformat())
+                    .values(user_id=user_id, label=label, key_prefix=prefix, key_hash=key_hash,
+                            created_at=datetime.now(UTC).isoformat(), expires_at=expires_at)
                     .returning(api_keys.c.id)
                 ).scalar_one()
             )
 
     def list_api_keys(self, user_id: int) -> list[Mapping[str, Any]]:
         statement = (
-            select(api_keys.c.id, api_keys.c.label, api_keys.c.key_prefix, api_keys.c.created_at, api_keys.c.last_used_at, api_keys.c.revoked_at)
+            select(api_keys.c.id, api_keys.c.label, api_keys.c.key_prefix, api_keys.c.created_at,
+                   api_keys.c.last_used_at, api_keys.c.revoked_at, api_keys.c.expires_at)
             .where(api_keys.c.user_id == user_id)
             .order_by(api_keys.c.id.desc())
         )
@@ -181,21 +194,28 @@ class Database:
 
     def get_api_key(self, user_id: int, key_id: int) -> Mapping[str, Any] | None:
         statement = select(
-            api_keys.c.id, api_keys.c.label, api_keys.c.key_prefix, api_keys.c.created_at, api_keys.c.last_used_at
+            api_keys.c.id, api_keys.c.label, api_keys.c.key_prefix, api_keys.c.created_at,
+            api_keys.c.last_used_at, api_keys.c.revoked_at, api_keys.c.expires_at
         ).where(api_keys.c.id == key_id, api_keys.c.user_id == user_id)
         with self._lock, self.engine.connect() as connection:
             return connection.execute(statement).mappings().first()
 
     def delete_api_key(self, user_id: int, key_id: int) -> bool:
         with self._lock, self.engine.begin() as connection:
-            result = connection.execute(delete(api_keys).where(api_keys.c.id == key_id, api_keys.c.user_id == user_id))
+            result = connection.execute(
+                update(api_keys)
+                .where(api_keys.c.id == key_id, api_keys.c.user_id == user_id, api_keys.c.revoked_at.is_(None))
+                .values(revoked_at=datetime.now(UTC).isoformat())
+            )
             return result.rowcount == 1
 
-    def find_user_by_api_hash(self, key_hash: str) -> User | None:
+    def find_api_key_identity(self, key_hash: str) -> tuple[User, int] | None:
+        now = datetime.now(UTC).isoformat()
         statement = (
-            select(users)
+            select(*users.c, api_keys.c.id.label("api_key_id"))
             .select_from(api_keys.join(users, users.c.id == api_keys.c.user_id))
-            .where(api_keys.c.key_hash == key_hash, api_keys.c.revoked_at.is_(None))
+            .where(api_keys.c.key_hash == key_hash, api_keys.c.revoked_at.is_(None),
+                   (api_keys.c.expires_at.is_(None) | (api_keys.c.expires_at > now)))
         )
         with self._lock, self.engine.begin() as connection:
             row = connection.execute(statement).mappings().first()
@@ -203,10 +223,15 @@ class Database:
                 connection.execute(
                     update(api_keys).where(api_keys.c.key_hash == key_hash).values(last_used_at=datetime.now(UTC).isoformat())
                 )
-        return self._user(row)
+        user = self._user(row)
+        return (user, int(row["api_key_id"])) if user and row else None
+
+    def find_user_by_api_hash(self, key_hash: str) -> User | None:
+        identity = self.find_api_key_identity(key_hash)
+        return identity[0] if identity else None
 
     def record_request(
-        self, user_id: int, *, success: bool, status_code: int, model: str | None,
+        self, user_id: int, *, api_key_id: int | None = None, success: bool, status_code: int, model: str | None,
         prompt_tokens: int | None, completion_tokens: int | None,
         total_tokens: int | None, cost_usd: Any, response_time_ms: int,
     ) -> None:
@@ -214,6 +239,7 @@ class Database:
             connection.execute(
                 insert(request_logs).values(
                     user_id=user_id,
+                    api_key_id=api_key_id,
                     created_at=datetime.now(UTC).isoformat(),
                     success=success,
                     status_code=status_code,
@@ -240,10 +266,36 @@ class Database:
 
     def list_request_logs(self, user_id: int, limit: int = 50) -> list[Mapping[str, Any]]:
         statement = (
-            select(request_logs)
+            select(*request_logs.c, api_keys.c.label.label("api_key_label"),
+                   api_keys.c.key_prefix.label("api_key_prefix"))
+            .select_from(request_logs.outerjoin(api_keys, request_logs.c.api_key_id == api_keys.c.id))
             .where(request_logs.c.user_id == user_id)
             .order_by(request_logs.c.id.desc())
             .limit(limit)
         )
         with self._lock, self.engine.connect() as connection:
             return list(connection.execute(statement).mappings().all())
+
+    def dashboard_charts(self, user_id: int) -> dict[str, list[Mapping[str, Any]]]:
+        # Reuse the exact same SQL expression so PostgreSQL sees identical bind
+        # parameters in SELECT, GROUP BY and ORDER BY.
+        day = func.substr(request_logs.c.created_at, 1, 10)
+        by_day = (
+            select(day.label("label"),
+                   func.count(request_logs.c.id).label("requests"),
+                   func.coalesce(func.sum(request_logs.c.total_tokens), 0).label("tokens"))
+            .where(request_logs.c.user_id == user_id)
+            .group_by(day)
+            .order_by(day.desc()).limit(14)
+        )
+        by_key = (
+            select(api_keys.c.label.label("label"), func.count(request_logs.c.id).label("requests"),
+                   func.coalesce(func.sum(request_logs.c.total_tokens), 0).label("tokens"))
+            .select_from(api_keys.outerjoin(request_logs, request_logs.c.api_key_id == api_keys.c.id))
+            .where(api_keys.c.user_id == user_id)
+            .group_by(api_keys.c.id, api_keys.c.label).order_by(func.count(request_logs.c.id).desc())
+        )
+        with self._lock, self.engine.connect() as connection:
+            days = list(reversed(connection.execute(by_day).mappings().all()))
+            keys = list(connection.execute(by_key).mappings().all())
+        return {"by_day": days, "by_key": keys}

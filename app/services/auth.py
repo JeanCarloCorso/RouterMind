@@ -2,12 +2,25 @@ import base64
 import hashlib
 import hmac
 import secrets
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.services.database import Database, User
+
+EXPIRATION_OPTIONS = {
+    "1h": timedelta(hours=1), "1d": timedelta(days=1), "7d": timedelta(days=7),
+    "30d": timedelta(days=30), "90d": timedelta(days=90), "180d": timedelta(days=180),
+    "1y": timedelta(days=365), "never": None,
+}
+
+@dataclass(frozen=True)
+class ApiIdentity:
+    user: User
+    api_key_id: int
 
 
 class AuthService:
@@ -62,13 +75,22 @@ class AuthService:
     def _api_hash(self, token: str) -> str:
         return hmac.new(self.secret, b"routemind:api:v1:" + token.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    def issue_api_key(self, user_id: int, label: str) -> str:
+    def issue_api_key(self, user_id: int, label: str, expiration: str = "never") -> str:
+        if expiration not in EXPIRATION_OPTIONS:
+            raise ValueError("Período de expiração inválido.")
         clean_label = label.strip()[:80] or "Chave principal"
         token = "rm_live_" + secrets.token_urlsafe(32)
-        self.database.create_api_key(user_id, clean_label, token[:16], self._api_hash(token))
+        duration = EXPIRATION_OPTIONS[expiration]
+        expires_at = (datetime.now(UTC) + duration).isoformat() if duration else None
+        self.database.create_api_key(user_id, clean_label, token[:16], self._api_hash(token), expires_at)
         return token
 
-    def authenticate_api_key(self, token: str) -> User | None:
+    def authenticate_api_identity(self, token: str) -> ApiIdentity | None:
         if not token.startswith("rm_live_") or len(token) < 32:
             return None
-        return self.database.find_user_by_api_hash(self._api_hash(token))
+        identity = self.database.find_api_key_identity(self._api_hash(token))
+        return ApiIdentity(*identity) if identity else None
+
+    def authenticate_api_key(self, token: str) -> User | None:
+        identity = self.authenticate_api_identity(token)
+        return identity.user if identity else None

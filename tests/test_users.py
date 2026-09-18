@@ -1,6 +1,8 @@
 import re
+from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 
 from app.core.config import get_settings
 from app.main import create_app
@@ -110,6 +112,10 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch):
         assert upstream.upstream_keys[-2:] == ["sk-or-v1-alice-replacement-key"] * 2
         dashboard = await client.get("/dashboard")
         assert "Histórico de requisições" in dashboard.text
+        assert "Requisições por dia" in dashboard.text
+        assert "Uso por chave" in dashboard.text
+        assert "Produção" in dashboard.text
+        assert all(row["api_key_id"] == database.list_api_keys(1)[0]["id"] for row in database.requests)
         assert "free/model" in dashboard.text
         assert "Bem-sucedidas</span><strong>2" in dashboard.text
         assert "Com erro</span><strong>1" in dashboard.text
@@ -119,7 +125,7 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch):
         get_settings.cache_clear()
 
 
-async def test_csrf_confirmation_and_physical_key_deletion(monkeypatch):
+async def test_csrf_confirmation_and_logical_key_deletion(monkeypatch):
     monkeypatch.setenv("ROUTEMIND_SECRET_KEY", "integration-secret-at-least-32-characters")
     monkeypatch.setenv("ROUTEMIND_ENVIRONMENT", "development")
     monkeypatch.setenv("ROUTEMIND_SECURE_COOKIES", "false")
@@ -150,8 +156,8 @@ async def test_csrf_confirmation_and_physical_key_deletion(monkeypatch):
         key_id = database.list_api_keys(1)[0]["id"]
         confirmation = await client.get(f"/keys/{key_id}/delete")
         assert confirmation.status_code == 200
-        assert "Confirmar exclusão permanente" in confirmation.text
-        assert "Esta ação é permanente" in confirmation.text
+        assert "Confirmar revogação" in confirmation.text
+        assert "permanecerá no histórico" in confirmation.text
         assert len(database.list_api_keys(1)) == 1
 
         invalid_csrf = await client.post(f"/keys/{key_id}/delete", data={"csrf": "invalid"})
@@ -164,9 +170,9 @@ async def test_csrf_confirmation_and_physical_key_deletion(monkeypatch):
             follow_redirects=True,
         )
         assert deleted.status_code == 200
-        assert "Nenhuma chave criada" in deleted.text
-        assert database.list_api_keys(1) == []
-        assert database.get_api_key(1, key_id) is None
+        assert "Revogada" in deleted.text
+        assert len(database.list_api_keys(1)) == 1
+        assert database.get_api_key(1, key_id)["revoked_at"] is not None
         denied = await client.post(
             "/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {route_key}"},
@@ -194,6 +200,23 @@ def test_api_keys_are_isolated_per_user():
     assert resolved_alice and auth.decrypt_openrouter_key(resolved_alice) == "sk-or-v1-alice-key"
     assert resolved_bob and auth.decrypt_openrouter_key(resolved_bob) == "sk-or-v1-bob-key"
     assert auth.authenticate_api_key("rm_live_unknown_but_long_enough_to_validate") is None
+
+
+def test_api_key_expiration_and_validation():
+    database = MemoryDatabase()
+    auth = AuthService(database, "expiration-secret-with-at-least-32-characters")
+    user = auth.register("Alice", "expires@example.com", "alice-secure-password")
+    token = auth.issue_api_key(user.id, "Uma hora", "1h")
+    key = database.list_api_keys(user.id)[0]
+    expires_at = datetime.fromisoformat(key["expires_at"])
+    assert timedelta(minutes=59) < expires_at - datetime.now(UTC) <= timedelta(hours=1)
+    assert auth.authenticate_api_key(token) == user
+
+    database.keys[key["id"]]["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    assert auth.authenticate_api_key(token) is None
+
+    with pytest.raises(ValueError, match="expiração inválido"):
+        auth.issue_api_key(user.id, "Inválida", "2d")
 
 
 async def test_api_rejects_account_without_openrouter_key(monkeypatch):

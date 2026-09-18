@@ -85,20 +85,22 @@ def create_app(openrouter_client=None, database=None) -> FastAPI:
         if request.url.path.startswith("/api/v1/"):
             authorization = request.headers.get("authorization", "")
             token = authorization.removeprefix("Bearer ").strip() if authorization.startswith("Bearer ") else ""
-            user = auth.authenticate_api_key(token)
-            if not user:
+            api_identity = auth.authenticate_api_identity(token)
+            if not api_identity:
                 return JSONResponse(status_code=401, content={"error": {"message": "Invalid RouteMind API key", "code": "invalid_api_key"}})
+            user = api_identity.user
             request.state.user = user
+            request.state.api_key_id = api_identity.api_key_id
             openrouter_key = auth.decrypt_openrouter_key(user)
             if not openrouter_key:
                 if track_request:
-                    persist_request(database, user.id, status_code=403, model=None, started_at=request.state.request_started)
+                    persist_request(database, user.id, api_key_id=request.state.api_key_id, status_code=403, model=None, started_at=request.state.request_started)
                 return JSONResponse(status_code=403, content={"error": {"message": "No valid OpenRouter key is configured for this account", "code": "openrouter_key_missing"}})
             request.state.openrouter_key = openrouter_key
             identity = f"user:{user.id}"
         if not await limiter.allow(identity):
             if track_request and hasattr(request.state, "user"):
-                persist_request(database, request.state.user.id, status_code=429, model=None, started_at=request.state.request_started)
+                persist_request(database, request.state.user.id, api_key_id=request.state.api_key_id, status_code=429, model=None, started_at=request.state.request_started)
             return JSONResponse(status_code=429, content={"error": {"message": "Rate limit exceeded", "code": "rate_limit_exceeded"}})
         try:
             response = await call_next(request)
@@ -107,6 +109,7 @@ def create_app(openrouter_client=None, database=None) -> FastAPI:
                 persist_request(
                     database,
                     request.state.user.id,
+                    api_key_id=request.state.api_key_id,
                     status_code=500,
                     model=getattr(request.state, "selected_model", None),
                     started_at=request.state.request_started,
@@ -117,6 +120,7 @@ def create_app(openrouter_client=None, database=None) -> FastAPI:
             persist_request(
                 database,
                 request.state.user.id,
+                api_key_id=request.state.api_key_id,
                 status_code=response.status_code,
                 model=getattr(request.state, "selected_model", None),
                 started_at=request.state.request_started,
