@@ -209,6 +209,30 @@ class Database:
             )
             return result.rowcount == 1
 
+    def extend_expired_api_key(self, user_id: int, key_id: int, expires_at: str | None) -> bool:
+        now = datetime.now(UTC).isoformat()
+        with self._lock, self.engine.begin() as connection:
+            result = connection.execute(
+                update(api_keys)
+                .where(api_keys.c.id == key_id, api_keys.c.user_id == user_id,
+                       api_keys.c.revoked_at.is_(None), api_keys.c.expires_at.is_not(None),
+                       api_keys.c.expires_at <= now)
+                .values(expires_at=expires_at)
+            )
+            return result.rowcount == 1
+
+    def remove_expired_api_key(self, user_id: int, key_id: int) -> bool:
+        now = datetime.now(UTC).isoformat()
+        with self._lock, self.engine.begin() as connection:
+            result = connection.execute(
+                delete(api_keys).where(
+                    api_keys.c.id == key_id, api_keys.c.user_id == user_id,
+                    api_keys.c.revoked_at.is_(None), api_keys.c.expires_at.is_not(None),
+                    api_keys.c.expires_at <= now,
+                )
+            )
+            return result.rowcount == 1
+
     def find_api_key_identity(self, key_hash: str) -> tuple[User, int] | None:
         now = datetime.now(UTC).isoformat()
         statement = (

@@ -186,6 +186,70 @@ async def test_csrf_confirmation_and_logical_key_deletion(monkeypatch):
         get_settings.cache_clear()
 
 
+async def test_expired_key_can_be_extended_or_removed(monkeypatch):
+    monkeypatch.setenv("ROUTEMIND_SECRET_KEY", "expired-key-secret-at-least-32-characters")
+    monkeypatch.setenv("ROUTEMIND_ENVIRONMENT", "development")
+    monkeypatch.setenv("ROUTEMIND_SECURE_COOKIES", "false")
+    get_settings.cache_clear()
+    database = MemoryDatabase()
+    database.initialize()
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app(FakeOpenRouter([model("free/model")]), database)),
+        base_url="http://test",
+    )
+    try:
+        register_page = await client.get("/register")
+        dashboard = await client.post(
+            "/register",
+            data={"csrf": csrf_from(register_page), "name": "Expired User",
+                  "email": "expired@example.com", "password": "correct horse battery staple",
+                  "password_confirmation": "correct horse battery staple"},
+            follow_redirects=True,
+        )
+        created = await client.post(
+            "/keys",
+            data={"csrf": csrf_from(dashboard), "label": "Integração", "expiration": "1h"},
+        )
+        token = re.search(r"rm_live_[A-Za-z0-9_-]+", created.text).group(0)  # type: ignore[union-attr]
+        key_id = database.list_api_keys(1)[0]["id"]
+        database.keys[key_id]["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+
+        expired_dashboard = await client.get("/dashboard")
+        assert "Expirada" in expired_dashboard.text
+        assert f"/keys/{key_id}/extend" in expired_dashboard.text
+        assert f"/keys/{key_id}/remove" in expired_dashboard.text
+
+        extend_page = await client.get(f"/keys/{key_id}/extend")
+        assert "Novo prazo a partir de agora" in extend_page.text
+        extended = await client.post(
+            f"/keys/{key_id}/extend",
+            data={"csrf": csrf_from(extend_page), "expiration": "7d"},
+            follow_redirects=True,
+        )
+        assert "Ativa" in extended.text
+        expires_at = datetime.fromisoformat(database.keys[key_id]["expires_at"])
+        assert timedelta(days=6, hours=23) < expires_at - datetime.now(UTC) <= timedelta(days=7)
+        assert create_app(FakeOpenRouter([]), database).state.auth.authenticate_api_key(token) is not None
+
+        assert (await client.get(f"/keys/{key_id}/remove")).status_code == 404
+        database.keys[key_id]["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        remove_page = await client.get(f"/keys/{key_id}/remove")
+        assert "Remover chave expirada?" in remove_page.text
+        assert (await client.post(
+            f"/keys/{key_id}/remove", data={"csrf": "invalid"}
+        )).status_code == 403
+        removed = await client.post(
+            f"/keys/{key_id}/remove",
+            data={"csrf": csrf_from(remove_page)},
+            follow_redirects=True,
+        )
+        assert removed.status_code == 200
+        assert database.get_api_key(1, key_id) is None
+    finally:
+        await client.aclose()
+        get_settings.cache_clear()
+
+
 def test_api_keys_are_isolated_per_user():
     database = MemoryDatabase()
     database.initialize()

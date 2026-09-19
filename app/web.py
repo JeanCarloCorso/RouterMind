@@ -196,8 +196,11 @@ def _dashboard(request: Request, user, revealed_key: str | None = None, message:
         return "Nunca" if not value else f"{str(value)[:19].replace('T', ' ')} UTC"
 
     def key_action(row):
-        if row["revoked_at"] or key_status(row)[0] == "Expirada":
+        if row["revoked_at"]:
             return "—"
+        if key_status(row)[0] == "Expirada":
+            return (f"<div class='actions'><a class='button secondary compact' href='/keys/{row['id']}/extend'>Prorrogar</a>"
+                    f"<a class='button danger compact' href='/keys/{row['id']}/remove'>Remover</a></div>")
         return f"<a class='button danger compact' href='/keys/{row['id']}/delete'>Revogar</a>"
 
     key_rows = "".join(
@@ -364,6 +367,71 @@ async def delete_key(key_id: int, request: Request):
         return HTMLResponse("CSRF inválido", status_code=403)
     if not request.app.state.database.delete_api_key(user.id, key_id):
         return _with_status(_page("Chave não encontrada", "<div class='card'><h1>Chave não encontrada</h1><a class='button secondary' href='/dashboard'>Voltar</a></div>"), 404)
+    return RedirectResponse("/dashboard", status_code=303)
+
+
+@router.get("/keys/{key_id}/extend")
+async def extend_key_page(key_id: int, request: Request):
+    user = _login_required(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    key = request.app.state.database.get_api_key(user.id, key_id)
+    now = datetime.now(UTC).isoformat()
+    if not key or key["revoked_at"] or not key["expires_at"] or key["expires_at"] > now:
+        return _with_status(_page("Chave indisponível", "<div class='card'><h1>Chave indisponível</h1><p class='muted'>Somente chaves expiradas podem ser prorrogadas.</p><a class='button secondary' href='/dashboard'>Voltar</a></div>"), 404)
+    content = f"""<div class='card'><p class='eyebrow'>Chave expirada</p><h1>Prorrogar chave RouteMind</h1>
+<p>A chave <strong>{html.escape(key['label'])}</strong> (<code>{html.escape(key['key_prefix'])}…</code>) voltará a funcionar imediatamente.</p>
+<form method='post' action='/keys/{key_id}/extend'><input type='hidden' name='csrf' value='{_csrf(request)}'>
+<label for='expiration'>Novo prazo a partir de agora</label><select id='expiration' name='expiration'><option value='1h'>1 hora</option><option value='1d'>1 dia</option><option value='7d'>7 dias</option><option value='30d' selected>30 dias</option><option value='90d'>90 dias</option><option value='180d'>180 dias</option><option value='1y'>1 ano</option><option value='never'>Nunca expira</option></select>
+<div class='actions'><a class='button secondary' href='/dashboard'>Cancelar</a><button type='submit'>Confirmar prorrogação</button></div></form></div>"""
+    return _page("Prorrogar chave", content)
+
+
+@router.post("/keys/{key_id}/extend")
+async def extend_key(key_id: int, request: Request):
+    user = _login_required(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    form = await request.form()
+    if not _check_csrf(request, str(form.get("csrf", ""))):
+        return HTMLResponse("CSRF inválido", status_code=403)
+    try:
+        extended = request.app.state.auth.extend_api_key(
+            user.id, key_id, str(form.get("expiration", ""))
+        )
+    except ValueError as exc:
+        return _with_status(_dashboard(request, user, message=str(exc)), 400)
+    if not extended:
+        return _with_status(_dashboard(request, user, message="Somente chaves expiradas podem ser prorrogadas."), 409)
+    return RedirectResponse("/dashboard", status_code=303)
+
+
+@router.get("/keys/{key_id}/remove")
+async def remove_key_page(key_id: int, request: Request):
+    user = _login_required(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    key = request.app.state.database.get_api_key(user.id, key_id)
+    now = datetime.now(UTC).isoformat()
+    if not key or key["revoked_at"] or not key["expires_at"] or key["expires_at"] > now:
+        return _with_status(_page("Chave indisponível", "<div class='card'><h1>Chave indisponível</h1><p class='muted'>Somente chaves expiradas podem ser removidas.</p><a class='button secondary' href='/dashboard'>Voltar</a></div>"), 404)
+    content = f"""<div class='card'><p class='eyebrow'>Ação permanente</p><h1>Remover chave expirada?</h1>
+<p>A chave <strong>{html.escape(key['label'])}</strong> (<code>{html.escape(key['key_prefix'])}…</code>) será removida definitivamente.</p>
+<div class='notice'>As métricas das requisições serão preservadas, mas deixarão de aparecer associadas a esta chave.</div>
+<div class='actions'><a class='button secondary' href='/dashboard'>Cancelar</a><form class='inline' method='post' action='/keys/{key_id}/remove'><input type='hidden' name='csrf' value='{_csrf(request)}'><button type='submit' class='danger'>Confirmar remoção</button></form></div></div>"""
+    return _page("Remover chave", content)
+
+
+@router.post("/keys/{key_id}/remove")
+async def remove_key(key_id: int, request: Request):
+    user = _login_required(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    form = await request.form()
+    if not _check_csrf(request, str(form.get("csrf", ""))):
+        return HTMLResponse("CSRF inválido", status_code=403)
+    if not request.app.state.database.remove_expired_api_key(user.id, key_id):
+        return _with_status(_dashboard(request, user, message="Somente chaves expiradas podem ser removidas."), 409)
     return RedirectResponse("/dashboard", status_code=303)
 
 

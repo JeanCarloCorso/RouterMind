@@ -95,6 +95,27 @@ class MemoryDatabase:
         key["revoked_at"] = datetime.now(UTC).isoformat()
         return True
 
+    def extend_expired_api_key(self, user_id: int, key_id: int, expires_at: str | None) -> bool:
+        key = self.keys.get(key_id)
+        now = datetime.now(UTC).isoformat()
+        if (not key or key["user_id"] != user_id or key["revoked_at"]
+                or not key["expires_at"] or key["expires_at"] > now):
+            return False
+        key["expires_at"] = expires_at
+        return True
+
+    def remove_expired_api_key(self, user_id: int, key_id: int) -> bool:
+        key = self.keys.get(key_id)
+        now = datetime.now(UTC).isoformat()
+        if (not key or key["user_id"] != user_id or key["revoked_at"]
+                or not key["expires_at"] or key["expires_at"] > now):
+            return False
+        del self.keys[key_id]
+        for row in self.requests:
+            if row.get("api_key_id") == key_id:
+                row["api_key_id"] = None
+        return True
+
     def find_api_key_identity(self, key_hash: str):
         key = next((key for key in self.keys.values() if key["key_hash"] == key_hash), None)
         now = datetime.now(UTC).isoformat()

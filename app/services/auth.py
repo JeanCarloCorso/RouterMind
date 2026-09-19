@@ -85,6 +85,13 @@ class AuthService:
         self.database.create_api_key(user_id, clean_label, token[:16], self._api_hash(token), expires_at)
         return token
 
+    def extend_api_key(self, user_id: int, key_id: int, expiration: str) -> bool:
+        if expiration not in EXPIRATION_OPTIONS:
+            raise ValueError("Período de prorrogação inválido.")
+        duration = EXPIRATION_OPTIONS[expiration]
+        expires_at = (datetime.now(UTC) + duration).isoformat() if duration else None
+        return self.database.extend_expired_api_key(user_id, key_id, expires_at)
+
     def authenticate_api_identity(self, token: str) -> ApiIdentity | None:
         if not token.startswith("rm_live_") or len(token) < 32:
             return None
