@@ -85,9 +85,10 @@ async def home(request: Request):
 def _documentation_page(filename: str) -> HTMLResponse:
     title = DOC_PAGES[filename]
     source = (DOCS_DIR / filename).read_text(encoding="utf-8")
-    # Documentation is versioned with the application. Escape raw HTML before
-    # rendering so Markdown files cannot inject active markup into the UI.
-    article = markdown.markdown(html.escape(source), extensions=["extra", "sane_lists"])
+    # The documentation is trusted, versioned application content. Markdown
+    # escapes text and code as it renders them; escaping the complete source
+    # beforehand would encode entities twice (for example, &quot; as &amp;quot;).
+    article = markdown.markdown(source, extensions=["extra", "sane_lists"])
     navigation = "".join(
         f"<a class='{'active' if page == filename else ''}' href='/docs/{page}'>{html.escape(label)}</a>"
         for page, label in DOC_PAGES.items()

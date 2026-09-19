@@ -28,6 +28,12 @@ async def test_public_pages_and_markdown_documentation(make_client):
     assert api_docs.status_code == 200
     assert "API de Chat Completions do RouteMind" in api_docs.text
     assert "<table>" in api_docs.text
+    assert "&amp;quot;" not in api_docs.text
+
+    examples = await client.get("/docs/examples.md")
+    assert examples.status_code == 200
+    assert "&quot;messages&quot;" in examples.text
+    assert "&amp;quot;" not in examples.text
 
     missing = await client.get("/docs/unknown.md")
     assert missing.status_code == 404
