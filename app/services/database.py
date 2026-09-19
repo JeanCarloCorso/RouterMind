@@ -283,14 +283,16 @@ class Database:
         by_day = (
             select(day.label("label"),
                    func.count(request_logs.c.id).label("requests"),
-                   func.coalesce(func.sum(request_logs.c.total_tokens), 0).label("tokens"))
+                   func.coalesce(func.sum(request_logs.c.total_tokens), 0).label("tokens"),
+                   func.coalesce(func.sum(request_logs.c.cost_usd), 0).label("cost_usd"))
             .where(request_logs.c.user_id == user_id)
             .group_by(day)
             .order_by(day.desc()).limit(14)
         )
         by_key = (
             select(api_keys.c.label.label("label"), func.count(request_logs.c.id).label("requests"),
-                   func.coalesce(func.sum(request_logs.c.total_tokens), 0).label("tokens"))
+                   func.coalesce(func.sum(request_logs.c.total_tokens), 0).label("tokens"),
+                   func.coalesce(func.sum(request_logs.c.cost_usd), 0).label("cost_usd"))
             .select_from(api_keys.outerjoin(request_logs, request_logs.c.api_key_id == api_keys.c.id))
             .where(api_keys.c.user_id == user_id)
             .group_by(api_keys.c.id, api_keys.c.label).order_by(func.count(request_logs.c.id).desc())

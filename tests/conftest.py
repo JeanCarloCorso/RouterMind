@@ -142,14 +142,16 @@ class MemoryDatabase:
             if row["user_id"] != user_id:
                 continue
             day = row["created_at"][:10]
-            item = days.setdefault(day, {"label": day, "requests": 0, "tokens": 0})
+            item = days.setdefault(day, {"label": day, "requests": 0, "tokens": 0, "cost_usd": 0})
             item["requests"] += 1
             item["tokens"] += row.get("total_tokens") or 0
+            item["cost_usd"] += row.get("cost_usd") or 0
         keys = []
         for key in self.list_api_keys(user_id):
             matching = [row for row in self.requests if row.get("api_key_id") == key["id"]]
             keys.append({"label": key["label"], "requests": len(matching),
-                         "tokens": sum(row.get("total_tokens") or 0 for row in matching)})
+                         "tokens": sum(row.get("total_tokens") or 0 for row in matching),
+                         "cost_usd": sum((row.get("cost_usd") or 0 for row in matching), 0)})
         return {"by_day": list(days.values())[-14:], "by_key": keys}
 
 

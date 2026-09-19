@@ -112,8 +112,10 @@ async def test_account_to_personal_openrouter_key_flow(monkeypatch):
         assert upstream.upstream_keys[-2:] == ["sk-or-v1-alice-replacement-key"] * 2
         dashboard = await client.get("/dashboard")
         assert "Histórico de requisições" in dashboard.text
-        assert "Requisições por dia" in dashboard.text
-        assert "Uso por chave" in dashboard.text
+        assert "Uso de tokens por dia" in dashboard.text
+        assert "Uso de tokens por chave" in dashboard.text
+        assert "Gasto em USD por dia" in dashboard.text
+        assert "Gasto em USD por chave" in dashboard.text
         assert "Produção" in dashboard.text
         assert all(row["api_key_id"] == database.list_api_keys(1)[0]["id"] for row in database.requests)
         assert "free/model" in dashboard.text
